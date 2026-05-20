@@ -1,0 +1,6 @@
+# ignore onnx
+*.onnx
+
+.vscode
+__pycache__/
+*.pyc
