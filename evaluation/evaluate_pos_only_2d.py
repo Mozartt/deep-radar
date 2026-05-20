@@ -12,8 +12,8 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from model.deep_radar import RadarMultiTaskNet, RadarMultiTaskNetPositionOnly
-from trainer.my_dataloader import RadarMatDataset
+from model.deep_radar import RadarMultiTaskNetPositionOnly2D
+from data_loaders.my_dataloader import RadarMatDataset
 
 
 @torch.no_grad()
@@ -21,7 +21,7 @@ def main():
 	device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 	checkpoint_path = PROJECT_ROOT / "best_radar_model.pt"
-	test_root_dir = Path(r"D:\radar-dataset2\test")
+	test_root_dir = Path(r"D:\\radar-dataset-clean-pos-only-2D\\test")
 
 	batch_size = 64
 	num_workers = 4
@@ -40,7 +40,7 @@ def main():
 		persistent_workers=num_workers > 0,
 	)
 
-	model = RadarMultiTaskNetPositionOnly(use_fft=True, heatmap_size=heatmap_size).to(device)
+	model = RadarMultiTaskNetPositionOnly2D(use_fft=True, heatmap_size=heatmap_size).to(device)
 
 	checkpoint = torch.load(checkpoint_path, map_location=device)
 	model.load_state_dict(checkpoint["model_state_dict"])
@@ -50,7 +50,7 @@ def main():
 
 	for signal, _, coord_gt in loader:
 		signal = signal.to(device, non_blocking=True).float()
-		coord_gt = coord_gt.to(device, non_blocking=True).float()
+		coord_gt = coord_gt.to(device, non_blocking=True).float()[..., :2]
 		pred_coord = model(signal)
 		pred_coord[:,0] = pred_coord[:,0] * 900.0 + 100.0
 		pred_coord[:,1] = pred_coord[:,1] * 900.0 + 100.0

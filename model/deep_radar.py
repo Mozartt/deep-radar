@@ -73,28 +73,30 @@ class ConvBlock(nn.Module):
 class RadarEncoder(nn.Module):
     def __init__(self, in_ch=5, base_ch=32, latent_dim=256):
         super().__init__()
+        self.conv1 = ConvBlock(in_ch, base_ch)          # 40x80
+        self.pool = nn.MaxPool2d(2)                     # 20x40
 
-        self.conv1 = ConvBlock(in_ch, base_ch)
-        self.conv2 = ConvBlock(base_ch, base_ch * 2)
-        self.conv3 = ConvBlock(base_ch * 2, base_ch * 4)
+        self.conv2 = ConvBlock(base_ch, base_ch * 2)    # 20x40
+        self.conv3 = ConvBlock(base_ch * 2, base_ch * 4)# 20x40
+        self.conv4 = ConvBlock(base_ch * 4, base_ch * 4)# 20x40
 
-        self.pool = nn.MaxPool2d(2)
-
-        self.global_pool = nn.AdaptiveAvgPool2d(1)
-
-        self.fc = nn.Linear(base_ch * 4, latent_dim)
+        self.fc = nn.Sequential(
+            nn.Linear(base_ch * 4 * 20 * 40, 512),
+            nn.ReLU(inplace=True),
+            nn.Linear(512, latent_dim),
+            nn.ReLU(inplace=True),
+        )
 
     def forward(self, x):
         x = self.conv1(x)        # [B, 32, 40, 80]
         x = self.pool(x)         # [B, 32, 20, 40]
 
         x = self.conv2(x)        # [B, 64, 20, 40]
-        x = self.pool(x)         # [B, 64, 10, 20]
+        x = self.conv3(x)        # [B, 128, 20, 40]
+        x = self.conv4(x)        # [B, 128, 20, 40]
 
-        x = self.conv3(x)        # [B, 128, 10, 20]
-
-        pooled = self.global_pool(x).squeeze(-1).squeeze(-1)
-        latent = self.fc(pooled)
+        x = torch.flatten(x, start_dim=1)
+        latent = self.fc(x)
 
         return latent
     
@@ -163,7 +165,22 @@ class CoordinateHead(nn.Module):
 
     def forward(self, latent):
         return self.mlp(latent)  # [B, 256] -> [B, 128] -> [B, 64] -> [B, 3]
-    
+
+class CoordinateHead2D(nn.Module):
+    def __init__(self, latent_dim=256):
+        super().__init__()
+
+        self.mlp = nn.Sequential(
+            nn.Linear(latent_dim, 128),
+            nn.ReLU(inplace=True),
+            nn.Linear(128, 64),
+            nn.ReLU(inplace=True),
+            nn.Linear(64, 2),
+        )
+
+    def forward(self, latent):
+        return self.mlp(latent)  # [B, 256] -> [B, 128] -> [B, 64] -> [B, 2]
+
 # -------------------------
 # Full model
 # -------------------------
@@ -204,6 +221,22 @@ class RadarMultiTaskNetPositionOnly(nn.Module):
 
         return pred_coord
 
+class RadarMultiTaskNetPositionOnly2D(nn.Module):
+    def __init__(self, use_fft=True, heatmap_size=64):
+        super().__init__()
+
+        in_ch = 5 if use_fft else 2
+
+        self.embedding = RadarSignalEmbedding(use_fft=use_fft)
+        self.encoder = RadarEncoder(in_ch=in_ch)
+        self.coord_head = CoordinateHead2D()
+
+    def forward(self, y_realimag):
+        x = self.embedding(y_realimag)
+        latent = self.encoder(x)
+        pred_coord = self.coord_head(latent)
+
+        return pred_coord
 
 class RadarMultiTaskNetONNX(nn.Module):
     def __init__(self, heatmap_size=64):

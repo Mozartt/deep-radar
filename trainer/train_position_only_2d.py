@@ -10,8 +10,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from model.deep_radar import RadarMultiTaskNet, RadarMultiTaskNetPositionOnly
-from trainer.my_dataloader import RadarMatDataset
+from model.deep_radar import RadarMultiTaskNetPositionOnly2D
+from data_loaders.my_dataloader import RadarMatDataset
+
 
 def train_one_epoch(model, loader, optimizer, device, scaler, use_amp, lambda_coord=0.1):
     model.train()
@@ -22,7 +23,7 @@ def train_one_epoch(model, loader, optimizer, device, scaler, use_amp, lambda_co
 
         signal = signal.to(device, non_blocking=True).float()
         heatmap = heatmap.to(device, non_blocking=True).float()
-        coord = coord.to(device, non_blocking=True).float()
+        coord = coord.to(device, non_blocking=True).float()[..., :2]
 
         optimizer.zero_grad(set_to_none=True)
 
@@ -53,10 +54,10 @@ def validate(model, loader, device, use_amp, lambda_coord=0.1):
     total_loss = 0.0
 
     for signal, heatmap, coord in loader:
-
+        
         signal = signal.to(device, non_blocking=True).float()
         heatmap = heatmap.to(device, non_blocking=True).float()
-        coord = coord.to(device, non_blocking=True).float()
+        coord = coord.to(device, non_blocking=True).float()[..., :2]
 
         with torch.amp.autocast('cuda', enabled=use_amp):
             pred_coord = model(signal)
@@ -106,11 +107,11 @@ def main():
     # -------------------------
 
     train_dataset = RadarMatDataset(
-        root_dir="D:\\radar-dataset2\\train",
+        root_dir="D:\\radar-dataset-clean-pos-only-2D\\train",
     )
 
     val_dataset = RadarMatDataset(
-        root_dir="D:\\radar-dataset2\\validation",
+        root_dir="D:\\radar-dataset-clean-pos-only-2D\\validation",
     )
 
     train_loader = DataLoader(
@@ -135,7 +136,7 @@ def main():
     # Model
     # -------------------------
 
-    model = RadarMultiTaskNetPositionOnly(
+    model = RadarMultiTaskNetPositionOnly2D(
         use_fft=True,
         heatmap_size=heatmap_size,
     ).to(device)

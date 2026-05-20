@@ -17,34 +17,31 @@ except ImportError:  # pragma: no cover
 
 
 class RadarMatDataset(Dataset):
-    """PyTorch dataset for MATLAB samples saved as sample_XXXXXX.mat files."""
+	"""PyTorch dataset for MATLAB samples saved as sample_XXXXXX.mat files."""
 
-    def __init__(self, root_dir: str, pattern: str = "sample_*.mat"):
-        self.root_dir = Path(root_dir)
-        if not self.root_dir.exists():
-            raise FileNotFoundError(f"Dataset folder does not exist: {self.root_dir}")
+	def __init__(self, root_dir: str, pattern: str = "sample_*.mat"):
+		self.root_dir = Path(root_dir)
+		if not self.root_dir.exists():
+			raise FileNotFoundError(f"Dataset folder does not exist: {self.root_dir}")
 
-        self.file_paths: List[Path] = sorted(self.root_dir.glob(pattern))
-        if not self.file_paths:
-            raise ValueError(f"No .mat files found in {self.root_dir} with pattern '{pattern}'")
+		self.file_paths: List[Path] = sorted(self.root_dir.glob(pattern))
+		if not self.file_paths:
+			raise ValueError(f"No .mat files found in {self.root_dir} with pattern '{pattern}'")
 
-    def __len__(self) -> int:
-        return len(self.file_paths)
+	def __len__(self) -> int:
+		return len(self.file_paths)
 
-    def __getitem__(self, idx: int):
-        sample = _load_sample_dict(self.file_paths[idx])
-        signal = _to_signal_tensor(sample["y_ell_clean"])
-        heatmap = _to_heatmap_tensor(sample["heatmap"])
-        coord = _to_coord_tensor(sample["target_xyz"])
-        heatmap = heatmap - heatmap.min()
-        heatmap = heatmap / (heatmap.max() + 1e-8)
+	def __getitem__(self, idx: int):
+		sample = _load_sample_dict(self.file_paths[idx])
+		signal = _to_signal_tensor(sample["y_ell"])
+		heatmap = _to_heatmap_tensor(sample["heatmap"])
+		coord = _to_coord_tensor(sample["target_xyz"])
+		if heatmap.numel() > 0:
+			heatmap = heatmap - heatmap.min()
+			heatmap = heatmap / (heatmap.max() + 1e-8)
 
-        # coord_norm = coord.clone()
-        # coord_norm[0] = (coord[0] - 100.0) / 900.0
-        # coord_norm[1] = (coord[1] - 100.0) / 900.0
-        return signal, heatmap, coord
+		return signal, heatmap, coord
         
-
 
 def _load_sample_dict(file_path: Path) -> Dict[str, Any]:
 	errors = []
@@ -72,9 +69,9 @@ def _load_sample_with_scipy(file_path: Path) -> Dict[str, Any]:
 
 	sample_obj = data["sample"]
 
-	if hasattr(sample_obj, "y_ell_clean"):
+	if hasattr(sample_obj, "y_ell"):
 		return {
-			"y_ell_clean": sample_obj.y_ell_clean,
+			"y_ell": sample_obj.y_ell,
 			"heatmap": sample_obj.heatmap,
 			"target_xyz": sample_obj.target_xyz,
 		}
@@ -82,7 +79,7 @@ def _load_sample_with_scipy(file_path: Path) -> Dict[str, Any]:
 	if isinstance(sample_obj, np.ndarray) and sample_obj.dtype.names:
 		elem = sample_obj.reshape(-1)[0]
 		return {
-			"y_ell_clean": elem["y_ell_clean"],
+			"y_ell": elem["y_ell"],
 			"heatmap": elem["heatmap"],
 			"target_xyz": elem["target_xyz"],
 		}
@@ -102,7 +99,7 @@ def _load_sample_with_h5py(file_path: Path) -> Dict[str, Any]:
 		sample_group = _resolve_h5_obj(f, sample_obj)
 
 		return {
-			"y_ell_clean": _read_h5_field(f, sample_group, "y_ell_clean"),
+			"y_ell": _read_h5_field(f, sample_group, "y_ell"),
 			"heatmap": _read_h5_field(f, sample_group, "heatmap"),
 			"target_xyz": _read_h5_field(f, sample_group, "target_xyz"),
 		}
@@ -165,7 +162,7 @@ def _to_signal_tensor(signal: Any) -> torch.Tensor:
 		arr = np.transpose(arr, (2, 0, 1))
 	else:
 		raise ValueError(
-			"y_ell_clean must be complex [M,N] or real-imag channels [2,M,N]/[M,N,2]"
+			"y_ell must be complex [M,N] or real-imag channels [2,M,N]/[M,N,2]"
 		)
 
 	return torch.from_numpy(arr.astype(np.float32, copy=False))
@@ -173,6 +170,8 @@ def _to_signal_tensor(signal: Any) -> torch.Tensor:
 
 def _to_heatmap_tensor(heatmap: Any) -> torch.Tensor:
 	arr = np.asarray(heatmap, dtype=np.float32)
+	if arr.ndim == 1:
+		return torch.empty(0, dtype=torch.float32)
 	if arr.ndim == 2:
 		arr = arr[None, ...]
 	elif arr.ndim != 3:
