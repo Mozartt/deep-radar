@@ -30,8 +30,12 @@ def train_one_epoch(model, loader, optimizer, device, scaler, use_amp, lambda_co
         with torch.amp.autocast('cuda', enabled=use_amp):
             pred_coord = model(signal)
             pred_coord[:,0] = pred_coord[:,0] * 900.0 + 100.0
-            pred_coord[:,1] = pred_coord[:,1] * 900.0 + 100.0   
-            loss_coord = F.mse_loss(pred_coord, coord)
+            pred_coord[:,1] = pred_coord[:,1] * 900.0 + 100.0 
+
+
+            #loss_coord = F.mse_loss(pred_coord, coord)
+            error = torch.linalg.vector_norm(pred_coord - coord, dim=1)
+            loss_coord = torch.mean(error)
 
             loss = loss_coord
 
@@ -63,7 +67,8 @@ def validate(model, loader, device, use_amp, lambda_coord=0.1):
             pred_coord = model(signal)
             pred_coord[:,0] = pred_coord[:,0] * 900.0 + 100.0
             pred_coord[:,1] = pred_coord[:,1] * 900.0 + 100.0
-            loss_coord = F.mse_loss(pred_coord, coord)
+            error = torch.linalg.vector_norm(pred_coord - coord, dim=1)
+            loss_coord = torch.mean(error)
 
             loss = loss_coord
 
@@ -138,7 +143,6 @@ def main():
 
     model = RadarMultiTaskNetPositionOnly2D(
         use_fft=True,
-        heatmap_size=heatmap_size,
     ).to(device)
 
     optimizer = torch.optim.AdamW(

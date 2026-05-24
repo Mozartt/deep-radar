@@ -25,7 +25,6 @@ def main():
 
 	batch_size = 64
 	num_workers = 4
-	heatmap_size = 401
 
 	if not checkpoint_path.exists():
 		raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
@@ -40,7 +39,7 @@ def main():
 		persistent_workers=num_workers > 0,
 	)
 
-	model = RadarMultiTaskNetPositionOnly2D(use_fft=True, heatmap_size=heatmap_size).to(device)
+	model = RadarMultiTaskNetPositionOnly2D(use_fft=True).to(device)
 
 	checkpoint = torch.load(checkpoint_path, map_location=device)
 	model.load_state_dict(checkpoint["model_state_dict"])

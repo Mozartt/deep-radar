@@ -222,7 +222,7 @@ class RadarMultiTaskNetPositionOnly(nn.Module):
         return pred_coord
 
 class RadarMultiTaskNetPositionOnly2D(nn.Module):
-    def __init__(self, use_fft=True, heatmap_size=64):
+    def __init__(self, use_fft=True):
         super().__init__()
 
         in_ch = 5 if use_fft else 2
@@ -239,15 +239,13 @@ class RadarMultiTaskNetPositionOnly2D(nn.Module):
         return pred_coord
 
 class RadarMultiTaskNetONNX(nn.Module):
-    def __init__(self, heatmap_size=64):
+    def __init__(self):
         super().__init__()
 
         self.encoder = RadarEncoder(in_ch=5)
-        self.heatmap_head = HeatmapHead(out_size=heatmap_size)
         self.coord_head = CoordinateHead()
 
     def forward(self, x_embedded):
         latent = self.encoder(x_embedded)
-        pred_heatmap = self.heatmap_head(latent)
         pred_coord = self.coord_head(latent)
-        return pred_heatmap, pred_coord
+        return pred_coord

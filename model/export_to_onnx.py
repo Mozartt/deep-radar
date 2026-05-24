@@ -1,8 +1,8 @@
 # export model to onnx
 import torch
-from deep_radar import RadarMultiTaskNet, RadarMultiTaskNetONNX
+from deep_radar import RadarMultiTaskNetONNX
 
-model = RadarMultiTaskNetONNX(heatmap_size=64)
+model = RadarMultiTaskNetONNX()
 model.eval()
 
 dummy_input = torch.randn(1, 5, 40, 80)
@@ -12,6 +12,6 @@ torch.onnx.export(
     dummy_input,
     "radar_multitask_net.onnx",
     input_names=["receiver_signal"],
-    output_names=["pred_heatmap", "pred_coord"],
+    output_names=["pred_coord"],
     opset_version=17,
 )
