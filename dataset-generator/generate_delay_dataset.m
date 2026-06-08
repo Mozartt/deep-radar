@@ -28,16 +28,15 @@ addpath("../simulator/")
 numSamples = 10000;
 
 % Spatial region for target generation
-xRange = [100, 1000];
-yRange = [100, 1000];
-zRange = [500, 500];
+
+zRange = [300, 300];
 
 % Signal parameters
 alphaRange = [1, 1];
-snrRange   = [5, 40];
+snrRange   = [-5, 20]; %dB
 
 % Output folder
-datasetDir = "D:\radar-dataset-delay-only2\";
+datasetDir = "D:\radar-dataset-noisy\";
 
 if ~exist(datasetDir, 'dir')
     mkdir(datasetDir);
@@ -56,6 +55,9 @@ snrVec    = zeros(numSamples, 1);
 %% -------------------------------
 
 fprintf('Generating dataset...\n');
+radius = 150;
+theta = 2 * pi * rand(numSamples, 1);
+r = radius * sqrt(rand(numSamples, 1));
 
 for i = 1:numSamples
 
@@ -63,10 +65,9 @@ for i = 1:numSamples
     % Random target location
     %% ---------------------------------
 
-    x = rand_uniform(xRange);
-    y = rand_uniform(yRange);
+    x = r(i) .* cos(theta(i));
+    y = r(i) .* sin(theta(i));
     z = rand_uniform(zRange);
-
     p_target = [x; y; z];
     
     %% ---------------------------------
@@ -74,13 +75,13 @@ for i = 1:numSamples
     %% ---------------------------------
 
     alpha = rand_uniform(alphaRange);
-    SNR   = rand_uniform(snrRange);
+    SNR = snrRange(1) + (snrRange(2)-snrRange(1)) * rand();
 
     %% ---------------------------------
     % Generate heatmap
     %% ---------------------------------
 
-    [y_ell, tau] = get_radar_response(p_target, alpha, SNR);
+    [y_ell, tau] = get_radar_response_noisy(p_target, alpha, SNR);
 
     %% ---------------------------------
     % Normalize heatmap
@@ -123,9 +124,9 @@ end
 
 metadata.numSamples = numSamples;
 
-metadata.xRange = xRange;
-metadata.yRange = yRange;
-metadata.zRange = zRange;
+%metadata.xRange = xRange;
+%metadata.yRange = yRange;
+%metadata.zRange = zRange;
 
 metadata.alphaRange = alphaRange;
 metadata.snrRange = snrRange;
