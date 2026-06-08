@@ -36,7 +36,7 @@ def compute_tau_stats(dataset):
 
 
 def compute_coord_stats(dataset):
-    """Matches train_delay_2_pred (clamp min=1e-8, no std_floor)."""
+    """Matches train_delay_2_pred (std_floor, same as compute_tau_stats)."""
     loader = DataLoader(dataset, batch_size=512, shuffle=False, num_workers=4)
     all_tau, all_coord = [], []
     for _, _, coord, tau in loader:
@@ -44,8 +44,11 @@ def compute_coord_stats(dataset):
         all_coord.append(coord.float()[..., :2])
     all_tau   = torch.cat(all_tau,   dim=0)  # [N, M]
     all_coord = torch.cat(all_coord, dim=0)  # [N, 2]
+    tau_std = all_tau.std(dim=0)
+    std_floor = torch.clamp(tau_std.mean() * 0.1, min=1e-6)
+    tau_std = tau_std.clamp(min=std_floor)
     return (
-        all_tau.mean(dim=0),   all_tau.std(dim=0).clamp(min=1e-8),
+        all_tau.mean(dim=0), tau_std,
         all_coord.mean(dim=0), all_coord.std(dim=0).clamp(min=1e-8),
     )
 
@@ -58,14 +61,17 @@ def main():
     print(f"Using {gpu_label}")
 
     # ── Dataset ──────────────────────────────────────────────
-    train_dataset = RadarMatDataset(root_dir="D:\\radar-dataset\\train")
-    test_dataset   = RadarMatDataset(root_dir="D:\\radar-dataset\\test")
+    train_dataset = RadarMatDataset(root_dir="D:\\radar-dataset-noisy\\train")
+    test_dataset   = RadarMatDataset(root_dir="D:\\radar-dataset-noisy\\test")
 
     print("Computing normalisation stats from train set...")
-    tau_m, tau_sd, coord_mean, coord_std = compute_coord_stats(train_dataset)
+    tau_mean_1, tau_std_1 = compute_tau_stats(train_dataset)       # delay_net stats (std_floor)
+    tau_m, tau_sd, coord_mean, coord_std = compute_coord_stats(train_dataset)  # coord_net stats
 
-    tau_mean = tau_m.to(device)
-    tau_std  = tau_sd.to(device)
+    tau_mean_1 = tau_mean_1.to(device)
+    tau_std_1  = tau_std_1.to(device)
+    tau_mean   = tau_m.to(device)
+    tau_std    = tau_sd.to(device)
     coord_mean = coord_mean.to(device)
     coord_std  = coord_std.to(device)
     M = 40
@@ -76,7 +82,7 @@ def main():
     )
 
     # ── Load models ──────────────────────────────────────────
-    ckpt_tau   = torch.load("best_radar_model_samples_2_tau.pt",  map_location=device, weights_only=True)
+    ckpt_tau   = torch.load("best_radar_model_samples_2_tau_noisy.pt",  map_location=device, weights_only=True)
     ckpt_coord = torch.load("best_radar_model_best_tau_2_xy.pt",  map_location=device, weights_only=True)
 
     delay_net = DelayNet(M=M).to(device)
@@ -106,9 +112,9 @@ def main():
         # Stage 1 — signal → normalised tau
         pred_tau_norm = delay_net(signal)                               # [B, M]
 
-        # Bridge — denorm → re-norm for stage 2
+        # Bridge — denorm from delay_net space → renorm for coord_net space
         #pred_tau_phys = pred_tau_norm * tau_std_1 + tau_mean_1          # [B, M] (physical)
-        #tau_input     = (pred_tau_phys - tau_mean_2) / tau_std_2        # [B, M] (stage-2 norm)
+        #tau_input     = (pred_tau_phys - tau_mean) / tau_std            # [B, M] (coord_net norm)
 
         # Stage 2 — normalised tau → normalised coord
         pred_coord_norm = coord_net(pred_tau_norm)                          # [B, 2]

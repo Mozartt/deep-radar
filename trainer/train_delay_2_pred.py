@@ -25,8 +25,11 @@ def compute_dataset_stats(dataset):
         all_coord.append(coord.float()[..., :2])
     all_tau = torch.cat(all_tau, dim=0)      # [N, M]
     all_coord = torch.cat(all_coord, dim=0)  # [N, 2]
+    tau_std = all_tau.std(dim=0)
+    std_floor = torch.clamp(tau_std.mean() * 0.1, min=1e-6)
+    tau_std = tau_std.clamp(min=std_floor)
     return (
-        all_tau.mean(dim=0), all_tau.std(dim=0).clamp(min=1e-8),
+        all_tau.mean(dim=0), tau_std,
         all_coord.mean(dim=0), all_coord.std(dim=0).clamp(min=1e-8),
     )
 
@@ -53,7 +56,8 @@ def train_one_epoch(model,delay_net_model, loader, optimizer, device, scaler, us
         optimizer.zero_grad(set_to_none=True)
 
         with torch.amp.autocast('cuda', enabled=use_amp):
-            pred_norm  = model(tau)
+            tau_norm = (tau - tau_mean) / tau_std
+            pred_norm  = model(tau_norm)
             # denormalize → compare in meters for loss
             pred_coord = pred_norm * coord_std + coord_mean
             loss = torch.linalg.vector_norm(pred_coord - coord, dim=1).mean()
@@ -87,7 +91,8 @@ def validate(model, delay_net_model, loader, device, use_amp,
         #    pred_tau_norm = delay_net_model(signal)  # [B, M]
 
         with torch.amp.autocast('cuda', enabled=use_amp):
-            pred_norm  = model(tau)
+            tau_norm = (tau - tau_mean) / tau_std
+            pred_norm  = model(tau_norm)
             # denormalize → compare in meters for loss
             pred_coord = pred_norm * coord_std + coord_mean
             loss = torch.linalg.vector_norm(pred_coord - coord, dim=1).mean()

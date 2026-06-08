@@ -99,7 +99,7 @@ def main():
     )
 
     # ── Load model ───────────────────────────────────────────
-    ckpt  = torch.load("best_radar_model.pt",
+    ckpt  = torch.load("best_radar_model_samples_2_tau_noisy.pt",
                        map_location=device, weights_only=True)
     model = DelayNet(M=M).to(device)
     model.load_state_dict(ckpt["model_state_dict"])

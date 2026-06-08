@@ -13,7 +13,7 @@ class Delay2PredictionNet(nn.Module):
             predicted target position [x, y]
     """
 
-    def __init__(self, M, hidden_dim=128):
+    def __init__(self, M, hidden_dim=512):
         super().__init__()
 
         self.net = nn.Sequential(
@@ -25,7 +25,16 @@ class Delay2PredictionNet(nn.Module):
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
 
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+
             nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.LayerNorm(hidden_dim // 2),
             nn.GELU(),
 
             nn.Linear(hidden_dim // 2, 2)
