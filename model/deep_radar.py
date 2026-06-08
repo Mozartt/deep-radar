@@ -73,17 +73,19 @@ class ConvBlock(nn.Module):
 class RadarEncoder(nn.Module):
     def __init__(self, in_ch=5, base_ch=32, latent_dim=256):
         super().__init__()
-        self.conv1 = ConvBlock(in_ch, base_ch)          # 40x80
+        self.conv1 = ResBlock(in_ch, base_ch)           # 40x80
         self.pool = nn.MaxPool2d(2)                     # 20x40
 
-        self.conv2 = ConvBlock(base_ch, base_ch * 2)    # 20x40
-        self.conv3 = ConvBlock(base_ch * 2, base_ch * 4)# 20x40
-        self.conv4 = ConvBlock(base_ch * 4, base_ch * 4)# 20x40
+        self.conv2 = ResBlock(base_ch, base_ch * 2)
+        self.conv3 = ResBlock(base_ch * 2, base_ch * 4)
+        self.conv4 = ResBlock(base_ch * 4, base_ch * 4)
+
+        self.gap = nn.AdaptiveAvgPool2d(1)          # [B, 128, 20, 40] → [B, 128, 1, 1]
 
         self.fc = nn.Sequential(
-            nn.Linear(base_ch * 4 * 20 * 40, 512),
+            nn.Linear(base_ch * 4, 256),
             nn.ReLU(inplace=True),
-            nn.Linear(512, latent_dim),
+            nn.Linear(256, latent_dim),
             nn.ReLU(inplace=True),
         )
 
@@ -95,7 +97,8 @@ class RadarEncoder(nn.Module):
         x = self.conv3(x)        # [B, 128, 20, 40]
         x = self.conv4(x)        # [B, 128, 20, 40]
 
-        x = torch.flatten(x, start_dim=1)
+        x = self.gap(x)          # [B, 128, 1, 1]
+        x = torch.flatten(x, start_dim=1)  # [B, 128]
         latent = self.fc(x)
 
         return latent
@@ -204,7 +207,7 @@ class RadarMultiTaskNet(nn.Module):
 
         return pred_heatmap, pred_coord
 
-class RadarMultiTaskNetPositionOnly(nn.Module):
+class RadarMultiTaskNetPositionOnly3D(nn.Module):
     def __init__(self, use_fft=True, heatmap_size=64):
         super().__init__()
 
@@ -230,12 +233,13 @@ class RadarMultiTaskNetPositionOnly2D(nn.Module):
         self.embedding = RadarSignalEmbedding(use_fft=use_fft)
         self.encoder = RadarEncoder(in_ch=in_ch)
         self.coord_head = CoordinateHead2D()
+        self.test_mlp = RadarMLP(in_ch=in_ch)
+        self.memorizer = Memorizer(n_samples=100)
 
     def forward(self, y_realimag):
         x = self.embedding(y_realimag)
         latent = self.encoder(x)
         pred_coord = self.coord_head(latent)
-
         return pred_coord
 
 class RadarMultiTaskNetONNX(nn.Module):
@@ -249,3 +253,56 @@ class RadarMultiTaskNetONNX(nn.Module):
         latent = self.encoder(x_embedded)
         pred_coord = self.coord_head(latent)
         return pred_coord
+    
+
+class RadarMLP(nn.Module):
+    def __init__(self, in_ch=5, M=40, N=80):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(in_ch * M * N, 2048),
+            nn.ReLU(),
+            nn.Linear(2048, 1024),
+            nn.ReLU(),
+            nn.Linear(1024, 256),
+            nn.ReLU(),
+            nn.Linear(256, 2),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+    
+
+class Memorizer(nn.Module):
+    def __init__(self, n_samples=100):
+        super().__init__()
+
+        # one learnable (x,y) per sample
+        self.coords = nn.Parameter(
+            torch.zeros(n_samples, 2)
+        )
+
+    def forward(self, idx):
+        return self.coords[idx]
+
+
+class ResBlock(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 3, padding=1),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_ch, out_ch, 3, padding=1),
+            nn.BatchNorm2d(out_ch),
+        )
+
+        self.skip = nn.Identity()
+        if in_ch != out_ch:
+            self.skip = nn.Conv2d(in_ch, out_ch, 1)
+
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        return self.relu(self.conv(x) + self.skip(x))

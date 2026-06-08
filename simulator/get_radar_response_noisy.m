@@ -22,26 +22,26 @@ q = 100*[cos(theta); sin(theta); zeros(size(theta)) ]; % antenna locations [mete
 y_ell = alfa * y_ell;
 
 % Signal power
-%signal_power = mean(abs(y_ell(:)).^2);
+signal_power = mean(abs(y_ell(:)).^2);
 
 % Noise power
-%noise_power = signal_power / (10^(SNR_dB/10));
+noise_power = signal_power / (10^(SNR_dB/10));
 
 % Complex Gaussian noise
-%noise = sqrt(noise_power/2) * ...
-%    (randn(size(y_ell)) + 1i*randn(size(y_ell)));
+noise = sqrt(noise_power/2) * ...
+    (randn(size(y_ell)) + 1i*randn(size(y_ell)));
 
 % Noisy received signal
-%y_ell = y_ell + noise;
+y_ell = y_ell + noise;
 
-function [y_ell, tau] = Radar_Response(P_trnsmt,q,P_trgt,fc,a,Ts,n,c)
-    tau = norm(P_trgt - P_trnsmt)/c + vecnorm(q - P_trgt)./c; % propagation time
-    beta = exp( - 1i * 2 * pi * fc * tau).*exp( 1i * pi * a * tau.^2);
-    y_ell = diag(beta) * exp( - 1i * 2 * pi * a * tau' * Ts * n); % observed data
-    t = Ts * n;
-    win = (t >= tau.') & (t <= Tc);
-    y_ell = y_ell .* win;
-end
+    function [y_ell, tau] = Radar_Response(P_trnsmt,q,P_trgt,fc,a,Ts,n,c)
+        tau = norm(P_trgt - P_trnsmt)/c + vecnorm(q - P_trgt)./c; % propagation time
+        beta = exp( - 1i * 2 * pi * fc * tau).*exp( 1i * pi * a * tau.^2);
+        y_ell = diag(beta) * exp( - 1i * 2 * pi * a * tau' * Ts * n); % observed data
+        t = Ts * n;
+        win = (t >= tau.') & (t <= Tc);
+        y_ell = y_ell .* win;
+    end
 end
 
 

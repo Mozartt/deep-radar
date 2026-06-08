@@ -12,9 +12,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from model.deep_radar import RadarMultiTaskNetPositionOnly2D
 from data_loaders.my_dataloader import RadarMatDataset
+from torch.optim.lr_scheduler import CosineAnnealingLR
+
+# Coordinate range in meters — adjust if your dataset differs
+COORD_MIN = 100.0
+COORD_MAX = 1000.0
 
 
-def train_one_epoch(model, loader, optimizer, device, scaler, use_amp, lambda_coord=0.1):
+def train_one_epoch(model, loader, optimizer, device, scaler, use_amp):
     model.train()
 
     total_loss = 0.0
@@ -24,17 +29,15 @@ def train_one_epoch(model, loader, optimizer, device, scaler, use_amp, lambda_co
         signal = signal.to(device, non_blocking=True).float()
         heatmap = heatmap.to(device, non_blocking=True).float()
         coord = coord.to(device, non_blocking=True).float()[..., :2]
+        coord = (coord - COORD_MIN) / (COORD_MAX - COORD_MIN)  # normalize to [0, 1]
 
         optimizer.zero_grad(set_to_none=True)
 
         with torch.amp.autocast('cuda', enabled=use_amp):
             pred_coord = model(signal)
-            pred_coord[:,0] = pred_coord[:,0] * 900.0 + 100.0
-            pred_coord[:,1] = pred_coord[:,1] * 900.0 + 100.0 
-
 
             #loss_coord = F.mse_loss(pred_coord, coord)
-            error = torch.linalg.vector_norm(pred_coord - coord, dim=1)
+            error = torch.linalg.vector_norm(pred_coord - coord, dim=1) * (COORD_MAX - COORD_MIN)  # scale back to meters
             loss_coord = torch.mean(error)
 
             loss = loss_coord
@@ -52,22 +55,20 @@ def train_one_epoch(model, loader, optimizer, device, scaler, use_amp, lambda_co
 # ============================================================
 
 @torch.no_grad()
-def validate(model, loader, device, use_amp, lambda_coord=0.1):
+def validate(model, loader, device, use_amp):
     model.eval()
 
     total_loss = 0.0
 
     for signal, heatmap, coord in loader:
-        
         signal = signal.to(device, non_blocking=True).float()
         heatmap = heatmap.to(device, non_blocking=True).float()
         coord = coord.to(device, non_blocking=True).float()[..., :2]
+        coord = (coord - COORD_MIN) / (COORD_MAX - COORD_MIN)  # normalize to [0, 1]
 
         with torch.amp.autocast('cuda', enabled=use_amp):
             pred_coord = model(signal)
-            pred_coord[:,0] = pred_coord[:,0] * 900.0 + 100.0
-            pred_coord[:,1] = pred_coord[:,1] * 900.0 + 100.0
-            error = torch.linalg.vector_norm(pred_coord - coord, dim=1)
+            error = torch.linalg.vector_norm(pred_coord - coord, dim=1) * (COORD_MAX - COORD_MIN)
             loss_coord = torch.mean(error)
 
             loss = loss_coord
@@ -98,14 +99,10 @@ def main():
     # Config
     # -------------------------
 
-    heatmap_size = 401
-
-    batch_size = 16
-    epochs = 50
+    batch_size = 64
+    epochs = 300
 
     lr = 1e-3
-
-    lambda_coord = 0.1
 
     # -------------------------
     # Dataset
@@ -152,6 +149,7 @@ def main():
     )
 
     scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
+    scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
 
     # -------------------------
     # Training loop
@@ -168,21 +166,22 @@ def main():
             device,
             scaler,
             use_amp,
-            lambda_coord=lambda_coord,
         )
+
+        scheduler.step()  # must come after optimizer.step() (which is inside train_one_epoch)
 
         val_loss = validate(
             model,
             val_loader,
             device,
             use_amp,
-            lambda_coord=lambda_coord,
         )
 
         print(
             f"Epoch {epoch:03d} | "
             f"train loss: {train_loss:.6f} | "
-            f"val loss: {val_loss:.6f}"
+            f"val loss: {val_loss:.6f} | "
+            f"lr: {scheduler.get_last_lr()[0]:.2e}"
         )
 
         # -------------------------

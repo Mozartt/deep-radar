@@ -11,6 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from model.delay_2_prediction_net import Delay2PredictionNet
+from model.delay_net import DelayNet
 from data_loaders.my_dataloader import RadarMatDataset
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
@@ -31,7 +32,7 @@ def compute_dataset_stats(dataset):
 
 
 
-def train_one_epoch(model, loader, optimizer, device, scaler, use_amp,
+def train_one_epoch(model,delay_net_model, loader, optimizer, device, scaler, use_amp,
                     tau_mean, tau_std, coord_mean, coord_std):
     model.train()
 
@@ -39,16 +40,20 @@ def train_one_epoch(model, loader, optimizer, device, scaler, use_amp,
 
     for signal, heatmap, coord, tau in loader:
 
-        tau   = tau.to(device, non_blocking=True).float()
-        coord = coord.to(device, non_blocking=True).float()[..., :2]
+        tau = tau.to(device, non_blocking=True).float()
 
-        tau_norm   = (tau - tau_mean) / tau_std
+        coord = coord.to(device, non_blocking=True).float()[..., :2]
         #tau_norm = tau * 1e6
 
+        # evaluate delay net to get tau_norm
+        #with torch.no_grad():
+            #signal = signal.to(device, non_blocking=True).float()
+            #pred_tau_norm = delay_net_model(signal)  # [B, M]
+        
         optimizer.zero_grad(set_to_none=True)
 
         with torch.amp.autocast('cuda', enabled=use_amp):
-            pred_norm  = model(tau_norm)
+            pred_norm  = model(tau)
             # denormalize → compare in meters for loss
             pred_coord = pred_norm * coord_std + coord_mean
             loss = torch.linalg.vector_norm(pred_coord - coord, dim=1).mean()
@@ -66,7 +71,7 @@ def train_one_epoch(model, loader, optimizer, device, scaler, use_amp,
 # ============================================================
 
 @torch.no_grad()
-def validate(model, loader, device, use_amp,
+def validate(model, delay_net_model, loader, device, use_amp,
              tau_mean, tau_std, coord_mean, coord_std):
     model.eval()
 
@@ -74,14 +79,15 @@ def validate(model, loader, device, use_amp,
 
     for signal, heatmap, coord, tau in loader:
 
-        tau   = tau.to(device, non_blocking=True).float()
         coord = coord.to(device, non_blocking=True).float()[..., :2]
-
-        tau_norm   = (tau - tau_mean) / tau_std
-        #tau_norm = tau * 1e6
+        tau = tau.to(device, non_blocking=True).float()
+        # evaluate delay net to get tau_norm
+        #with torch.no_grad():
+        #    signal = signal.to(device, non_blocking=True).float()
+        #    pred_tau_norm = delay_net_model(signal)  # [B, M]
 
         with torch.amp.autocast('cuda', enabled=use_amp):
-            pred_norm  = model(tau_norm)
+            pred_norm  = model(tau)
             # denormalize → compare in meters for loss
             pred_coord = pred_norm * coord_std + coord_mean
             loss = torch.linalg.vector_norm(pred_coord - coord, dim=1).mean()
@@ -122,11 +128,11 @@ def main():
     # -------------------------
 
     train_dataset = RadarMatDataset(
-        root_dir="D:\\radar-dataset-delay-only\\train",
+        root_dir="D:\\radar-dataset\\train",
     )
 
     val_dataset = RadarMatDataset(
-        root_dir="D:\\radar-dataset-delay-only\\validation",
+        root_dir="D:\\radar-dataset\\validation",
     )
 
     print("Computing normalisation statistics from train set...")
@@ -156,6 +162,13 @@ def main():
         persistent_workers=True,
     )
 
+    # delay net
+    ckpt  = torch.load("best_radar_model_samples_2_tau_clean.pt",
+                       map_location=device, weights_only=True)
+    delay_net_model = DelayNet(M=M).to(device)
+    delay_net_model.load_state_dict(ckpt["model_state_dict"])
+    delay_net_model.eval()
+
     # -------------------------
     # Model
     # -------------------------
@@ -182,14 +195,14 @@ def main():
     for epoch in range(1, epochs + 1):
 
         train_loss = train_one_epoch(
-            model, train_loader, optimizer, device, scaler, use_amp,
+            model, delay_net_model, train_loader, optimizer, device, scaler, use_amp,
             tau_mean, tau_std, coord_mean, coord_std,
         )
 
         scheduler.step()  # must come after optimizer.step() (which is inside train_one_epoch)
 
         val_loss = validate(
-            model, val_loader, device, use_amp,
+            model, delay_net_model, val_loader, device, use_amp,
             tau_mean, tau_std, coord_mean, coord_std,
         )
 
