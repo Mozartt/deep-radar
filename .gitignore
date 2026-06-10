@@ -4,3 +4,7 @@
 .vscode
 __pycache__/
 *.pyc
+
+saved-models/
+
+*.pt
