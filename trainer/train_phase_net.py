@@ -10,51 +10,61 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from model.delay_net import DelayNet
+from model.phase_net import PhaseOnlyNet
 from data_loaders.my_dataloader import RadarMatDataset
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 
-def compute_tau_stats(dataset):
-    """Compute per-feature mean and std of tau over the full training set."""
+def wrap_phase(phi):
+    return torch.atan2(torch.sin(phi), torch.cos(phi))
+
+def compute_dataset_stats(dataset):
+    """Compute per-feature mean and std of tau and coord[:2] over the full dataset."""
     loader = DataLoader(dataset, batch_size=512, shuffle=False, num_workers=4)
-    all_tau = []
+    all_tau, all_coord = [], []
     for signal, heatmap, coord, tau, phi in loader:
         all_tau.append(tau.float())
-    all_tau = torch.cat(all_tau, dim=0)  # [N, M]
-    tau_mean = all_tau.mean(dim=0)
+        all_coord.append(coord.float()[..., :2])
+    all_tau = torch.cat(all_tau, dim=0)      # [N, M]
+    all_coord = torch.cat(all_coord, dim=0)  # [N, 2]
     tau_std = all_tau.std(dim=0)
-    # Avoid exploding normalized error for near-constant receivers.
     std_floor = torch.clamp(tau_std.mean() * 0.1, min=1e-6)
     tau_std = tau_std.clamp(min=std_floor)
-    return tau_mean, tau_std
+    return (
+        all_tau.mean(dim=0), tau_std,
+        all_coord.mean(dim=0), all_coord.std(dim=0).clamp(min=1e-8),
+    )
 
 
 
-def train_one_epoch(model, loader, optimizer, device, scaler, use_amp, tau_mean, tau_std):
+def train_one_epoch(model, loader, optimizer, device, scaler, use_amp,
+                    tau_mean, tau_std, coord_mean, coord_std):
     model.train()
 
     total_loss = 0.0
 
     for signal, heatmap, coord, tau, phi in loader:
 
-        signal = signal.to(device, non_blocking=True).float()
-        tau = tau.to(device, non_blocking=True).float()
-
+        # Target: absolute phase per receiver (cos φ_m, sin φ_m).
+        # The model outputs absolute phase; relative phase δφ_m = φ_m − φ_0
+        # is recovered in post-processing:
+        #   cos δφ_m = cos φ_m·cos φ_0 + sin φ_m·sin φ_0
+        #   sin δφ_m = sin φ_m·cos φ_0 − cos φ_m·sin φ_0
+        phi = phi.to(device, non_blocking=True).float()
+        cos_target = torch.cos(phi)
+        sin_target = torch.sin(phi)
+        coord = coord.to(device, non_blocking=True).float()[..., :2]
         optimizer.zero_grad(set_to_none=True)
 
         with torch.amp.autocast('cuda', enabled=use_amp):
-            pred_tau_norm = model(signal)                        # model predicts in normalised space
-            pred_tau = pred_tau_norm * tau_std + tau_mean        # denorm to physical tau
-            loss = torch.linalg.vector_norm((pred_tau - tau) * 1e6, dim=1).mean()  # loss in µs
+            cos_pred, sin_pred = model(signal.to(device, non_blocking=True).float())
+            loss = F.mse_loss(cos_pred, cos_target) + F.mse_loss(sin_pred, sin_target)
 
         scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         scaler.step(optimizer)
         scaler.update()
 
-        total_loss += loss.item() * signal.size(0)
+        total_loss += loss.item() * tau.size(0)
 
     return total_loss / len(loader.dataset)
 
@@ -63,21 +73,25 @@ def train_one_epoch(model, loader, optimizer, device, scaler, use_amp, tau_mean,
 # ============================================================
 
 @torch.no_grad()
-def validate(model, loader, device, use_amp, tau_mean, tau_std):
+def validate(model, loader, device, use_amp,
+             tau_mean, tau_std, coord_mean, coord_std):
     model.eval()
 
     total_loss = 0.0
 
     for signal, heatmap, coord, tau, phi in loader:
-        signal = signal.to(device, non_blocking=True).float()
-        tau = tau.to(device, non_blocking=True).float()
+
+        coord = coord.to(device, non_blocking=True).float()[..., :2]
+        phi = phi.to(device, non_blocking=True).float()
+        cos_target = torch.cos(phi)
+        sin_target = torch.sin(phi)
+
 
         with torch.amp.autocast('cuda', enabled=use_amp):
-            pred_tau_norm = model(signal)                        # model predicts in normalised space
-            pred_tau = pred_tau_norm * tau_std + tau_mean        # denorm to physical tau
-            loss = torch.linalg.vector_norm((pred_tau - tau) * 1e6, dim=1).mean()  # loss in µs
-
-        total_loss += loss.item() * signal.size(0)
+            cos_pred, sin_pred = model(signal.to(device, non_blocking=True).float())
+            loss = F.mse_loss(cos_pred, cos_target) + F.mse_loss(sin_pred, sin_target)
+        
+        total_loss += loss.item() * tau.size(0)
 
     return total_loss / len(loader.dataset)
 
@@ -90,7 +104,7 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_cuda = device.type == "cuda"
-    use_amp = use_cuda
+    use_amp = False  # model is a small MLP — AMP gives no benefit here
 
     if use_cuda:
         torch.backends.cudnn.benchmark = True
@@ -104,10 +118,10 @@ def main():
     # -------------------------
 
     batch_size = 64
-    epochs = 50
+    epochs = 60
 
     lr = 1e-3
-
+    M= 40
     # -------------------------
     # Dataset
     # -------------------------
@@ -120,11 +134,14 @@ def main():
         root_dir="D:\\radar-dataset\\validation",
     )
 
-    print("Computing tau normalization statistics from train set...")
-    tau_mean, tau_std = compute_tau_stats(train_dataset)
-    tau_mean = tau_mean.to(device)
-    tau_std = tau_std.to(device)
-    print(f"  tau mean={tau_mean.mean():.4f}  std={tau_std.mean():.4f}")
+    print("Computing normalisation statistics from train set...")
+    tau_mean, tau_std, coord_mean, coord_std = compute_dataset_stats(train_dataset)
+    tau_mean   = tau_mean.to(device)
+    tau_std    = tau_std.to(device)
+    coord_mean = coord_mean.to(device)
+    coord_std  = coord_std.to(device)
+    print(f"  tau   mean={tau_mean.mean():.4f}  std={tau_std.mean():.4f}")
+    print(f"  coord mean={coord_mean}  std={coord_std}")
 
     train_loader = DataLoader(
         train_dataset,
@@ -144,12 +161,13 @@ def main():
         persistent_workers=True,
     )
 
+    # delay net
+    
+    model = PhaseOnlyNet(M=40, hidden_ch=512).to(device)
+
     # -------------------------
     # Model
     # -------------------------
-
-    model = DelayNet(M=tau_mean.numel()).to(device)
-    print("Model will predict normalised tau (target ~ N(0,1) per receiver).")
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -158,14 +176,9 @@ def main():
     )
 
     scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
-    scheduler = ReduceLROnPlateau(
-        optimizer,
-        mode='min',
-        factor=0.5,
-        patience=4,
-        threshold=1e-3,
-        min_lr=1e-6,
-    )
+    # Keep LR from collapsing too early; complete cosine cycle beyond current run.
+    scheduler_t_max = epochs
+    scheduler = CosineAnnealingLR(optimizer, T_max=scheduler_t_max, eta_min=1e-5)
 
     # -------------------------
     # Training loop
@@ -176,33 +189,22 @@ def main():
     for epoch in range(1, epochs + 1):
 
         train_loss = train_one_epoch(
-            model,
-            train_loader,
-            optimizer,
-            device,
-            scaler,
-            use_amp,
-            tau_mean,
-            tau_std,
+            model, train_loader, optimizer, device, scaler, use_amp,
+            tau_mean, tau_std, coord_mean, coord_std,
         )
+
+        scheduler.step()  # must come after optimizer.step() (which is inside train_one_epoch)
 
         val_loss = validate(
-            model,
-            val_loader,
-            device,
-            use_amp,
-            tau_mean,
-            tau_std,
+            model, val_loader, device, use_amp,
+            tau_mean, tau_std, coord_mean, coord_std,
         )
-
-        scheduler.step(val_loss)
-        current_lr = optimizer.param_groups[0]['lr']
 
         print(
             f"Epoch {epoch:03d} | "
             f"train loss: {train_loss:.6f} | "
             f"val loss: {val_loss:.6f} | "
-            f"lr: {current_lr:.2e}"
+            f"lr: {scheduler.get_last_lr()[0]:.2e}"
         )
 
         # -------------------------

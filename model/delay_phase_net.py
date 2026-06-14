@@ -1,11 +1,6 @@
-import os
-
-os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE" 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
-import matplotlib.pyplot as plt
 
 
 class ConvBlock(nn.Module):
@@ -25,80 +20,84 @@ class ConvBlock(nn.Module):
         return self.net(x)
 
 
-class DelayNet(nn.Module):
+class DelayPhaseNet(nn.Module):
     """
     Input:
         x: [B, 2, M, N]
-           2 = I/Q channels
-           M = receivers
-           N = fast-time samples
 
     Output:
-        tau: [B, M]
-             predicted delay per receiver
+        tau:     [B, M]
+        cos_phi: [B, M]
+        sin_phi: [B, M]
     """
 
-    def __init__(self, M=40, base_ch=32, hidden_ch=128):
+    def __init__(self, M=40, base_ch=32, hidden_ch=128, n_fft=1024):
         super().__init__()
 
         self.M = M
+        self.n_fft = n_fft
 
         self.encoder = nn.Sequential(
-            ConvBlock(3, base_ch),  # 3 channels: FFT real, FFT imag, FFT magnitude
+            ConvBlock(3, base_ch),
 
-            nn.MaxPool2d(kernel_size=(1, 2)),  # reduce time only
+            nn.MaxPool2d(kernel_size=(1, 2)),
 
             ConvBlock(base_ch, base_ch * 2),
 
-            nn.MaxPool2d(kernel_size=(1, 2)),  # reduce time only
+            nn.MaxPool2d(kernel_size=(1, 2)),
 
             ConvBlock(base_ch * 2, base_ch * 4),
         )
 
-        # Keep receiver dimension, collapse time dimension
         self.pool = nn.AdaptiveAvgPool2d((M, 1))
 
-        # Per-receiver delay head
+        # Keep this EXACTLY like your old DelayNet.
         self.delay_head = nn.Sequential(
             nn.Conv2d(base_ch * 4, hidden_ch, kernel_size=1),
             nn.LeakyReLU(0.1, inplace=True),
             nn.Conv2d(hidden_ch, 1, kernel_size=1)
         )
 
+        # New parallel phase head.
+        self.phase_head = nn.Sequential(
+            nn.Conv2d(base_ch * 4, hidden_ch, kernel_size=1),
+            nn.LeakyReLU(0.1, inplace=True),
+            nn.Conv2d(hidden_ch, 2, kernel_size=1)
+        )
+
     def forward(self, x):
-        # x: [B, 2, M, N]  (channel 0 = I, channel 1 = Q)
-        # Form complex signal and apply FFT of size 1024 over fast-time dimension.
+        # x: [B, 2, M, N]
         z = torch.complex(
             x[:, 0, :, :].float(),
             x[:, 1, :, :].float()
         )  # [B, M, N]
 
-        Z = torch.fft.fft(z, n=1024, dim=-1, norm="forward")
+        Z = torch.fft.fft(z, n=self.n_fft, dim=-1, norm="forward")
         Z = torch.fft.fftshift(Z, dim=-1)
 
         # Same convention as your original model.
-        Z = Z[:, :, : 512]  # [B, M, 512]
+        Z = Z[:, :, :self.n_fft // 2]  # [B, M, 512]
 
         mag = torch.log1p(Z.abs())
 
-        x = torch.stack(
+        x_fft = torch.stack(
             [Z.real, Z.imag, mag],
             dim=1
         ).to(x.dtype)  # [B, 3, M, 512]
 
-        # single_signal_complex = Z[0, 0, :]
-        # single_signal_mag = torch.abs(single_signal_complex)
-        # y_data = single_signal_mag.detach().cpu().numpy()
-        # x_data = np.linspace(-0.5, 0, len(y_data), endpoint=False)
-        # plt.figure()
-        # plt.plot(x_data, y_data)
-        # plt.grid(True)
-        # plt.show(block=False)
+        feat = self.encoder(x_fft)  # [B, C, M, N']
+        feat = self.pool(feat)      # [B, C, M, 1]
 
-        feat = self.encoder(x)          # [B, C, M, N']
-        feat = self.pool(feat)          # [B, C, M, 1]
-
-        tau = self.delay_head(feat)     # [B, 1, M, 1]
+        tau = self.delay_head(feat)       # [B, 1, M, 1]
         tau = tau.squeeze(1).squeeze(-1)  # [B, M]
 
-        return tau
+        phase = self.phase_head(feat)     # [B, 2, M, 1]
+        phase = phase.squeeze(-1)         # [B, 2, M]
+
+        # Enforce cos/sin vector on unit circle.
+        phase = F.normalize(phase, p=2, dim=1, eps=1e-8)
+
+        cos_phi = phase[:, 0, :]          # [B, M]
+        sin_phi = phase[:, 1, :]          # [B, M]
+
+        return tau, cos_phi, sin_phi

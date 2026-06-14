@@ -37,11 +37,12 @@ class RadarMatDataset(Dataset):
 		heatmap = _to_heatmap_tensor(sample["heatmap"])
 		coord = _to_coord_tensor(sample["target_xyz"])
 		tau = _to_tau_tensor(sample["tau"])
+		phi = _to_tau_tensor(sample["phi"])
 		if heatmap.numel() > 0:
 			heatmap = heatmap - heatmap.min()
 			heatmap = heatmap / (heatmap.max() + 1e-8)
 
-		return signal, heatmap, coord, tau
+		return signal, heatmap, coord, tau, phi
         
 
 def _load_sample_dict(file_path: Path) -> Dict[str, Any]:
@@ -76,6 +77,7 @@ def _load_sample_with_scipy(file_path: Path) -> Dict[str, Any]:
 			"heatmap": sample_obj.heatmap,
 			"target_xyz": sample_obj.target_xyz,
 			"tau": sample_obj.tau,
+			"phi": sample_obj.phi,
 		}
 
 	if isinstance(sample_obj, np.ndarray) and sample_obj.dtype.names:
@@ -84,7 +86,8 @@ def _load_sample_with_scipy(file_path: Path) -> Dict[str, Any]:
 			"y_ell": elem["y_ell"],
 			"heatmap": elem["heatmap"],
 			"target_xyz": elem["target_xyz"],
-			"tau": elem["tau"]
+			"tau": elem["tau"],
+			"phi": elem["phi"],
 		}
 	
 def _load_sample_with_h5py(file_path: Path) -> Dict[str, Any]:
@@ -103,6 +106,7 @@ def _load_sample_with_h5py(file_path: Path) -> Dict[str, Any]:
 			"heatmap": _read_h5_field(f, sample_group, "heatmap"),
 			"target_xyz": _read_h5_field(f, sample_group, "target_xyz"),
 			"tau": _read_h5_field(f, sample_group, "tau"),
+			"phi": _read_h5_field(f, sample_group, "phi"),
 		}
 
 

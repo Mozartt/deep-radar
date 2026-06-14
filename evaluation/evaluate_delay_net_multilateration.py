@@ -62,7 +62,7 @@ def multilaterate(tau_meas: np.ndarray, x0: np.ndarray | None = None) -> np.ndar
 def compute_tau_stats(dataset):
     loader = DataLoader(dataset, batch_size=512, shuffle=False, num_workers=4)
     all_tau = []
-    for _, _, _, tau in loader:
+    for _, _, _, tau, phi in loader:
         all_tau.append(tau.float())
     all_tau  = torch.cat(all_tau, dim=0)
     tau_mean = all_tau.mean(dim=0)
@@ -83,8 +83,8 @@ def main():
     print(f"Using {'GPU: ' + torch.cuda.get_device_name(0) if use_cuda else 'CPU'}")
 
     # ── Dataset ──────────────────────────────────────────────
-    train_dataset = RadarMatDataset(root_dir="D:\\radar-dataset-noisy\\train")
-    test_dataset   = RadarMatDataset(root_dir="D:\\radar-dataset-noisy\\test")
+    train_dataset = RadarMatDataset(root_dir="D:\\radar-dataset\\train")
+    test_dataset   = RadarMatDataset(root_dir="D:\\radar-dataset\\test")
 
     print("Computing tau normalisation stats from train set...")
     tau_mean, tau_std = compute_tau_stats(train_dataset)
@@ -99,7 +99,7 @@ def main():
     )
 
     # ── Load model ───────────────────────────────────────────
-    ckpt  = torch.load("best_radar_model_samples_2_tau_noisy.pt",
+    ckpt  = torch.load("best_radar_model.pt",
                        map_location=device, weights_only=True)
     model = DelayNet(M=M).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
@@ -115,7 +115,7 @@ def main():
     tau_std_np  = tau_std.cpu().numpy()
     n_samples   = 0
 
-    for batch_idx, (signal, _, coord_gt, tau_gt) in enumerate(test_loader):
+    for batch_idx, (signal, _, coord_gt, tau_gt, phi) in enumerate(test_loader):
         signal   = signal.to(device, non_blocking=True).float()
         coord_gt = coord_gt.cpu().numpy()[:, :3]   # [B, 3]
         tau_gt   = tau_gt.to(device, non_blocking=True).float()  # [B, M] physical seconds

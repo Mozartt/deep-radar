@@ -36,11 +36,20 @@ alphaRange = [1, 1];
 snrRange   = [-5, 20]; %dB
 
 % Output folder
-datasetDir = "D:\radar-dataset-noisy\";
+datasetDir = "D:\radar-dataset2\";
 
-if ~exist(datasetDir, 'dir')
-    mkdir(datasetDir);
+testDir  = fullfile(datasetDir, 'test');
+valDir   = fullfile(datasetDir, 'validation');
+trainDir = fullfile(datasetDir, 'train');
+
+for d = {testDir, valDir, trainDir}
+    if ~exist(d{1}, 'dir'), mkdir(d{1}); end
 end
+
+% Split boundaries (first 15% test, next 15% validation, rest train)
+nTest  = round(0.15 * numSamples);
+nVal   = round(0.15 * numSamples);
+% nTrain = numSamples - nTest - nVal  (remainder)
 
 %% -------------------------------
 % Preallocate labels
@@ -81,7 +90,7 @@ for i = 1:numSamples
     % Generate heatmap
     %% ---------------------------------
 
-    [y_ell, tau] = get_radar_response_noisy(p_target, alpha, SNR);
+    [y_ell, tau, phi] = get_radar_response(p_target, alpha, SNR);
 
     %% ---------------------------------
     % Normalize heatmap
@@ -97,14 +106,27 @@ for i = 1:numSamples
         'y_ell', single(y_ell), ...
         'heatmap', single(heatmap), ...
         'tau', single(tau), ...
+        'phi', single(phi), ...
         'target_xyz', single([x y z]), ...
         'alpha', single(alpha), ...
         'SNR', single(SNR), ...
         'sample_id', i ...
     );
 
+    %% ---------------------------------
+    % Determine split folder
+    %% ---------------------------------
+
+    if i <= nTest
+        splitDir = testDir;
+    elseif i <= nTest + nVal
+        splitDir = valDir;
+    else
+        splitDir = trainDir;
+    end
+
     parsave_sample( ...
-        fullfile(datasetDir, sprintf('sample_%06d.mat', i)), ...
+        fullfile(splitDir, sprintf('sample_%06d.mat', i)), ...
         sample ...
     );
 
