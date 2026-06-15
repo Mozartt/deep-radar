@@ -36,7 +36,7 @@ alphaRange = [1, 1];
 snrRange   = [-5, 20]; %dB
 
 % Output folder
-datasetDir = "D:\radar-dataset2\";
+datasetDir = "D:\radar-dataset-noisy\";
 
 testDir  = fullfile(datasetDir, 'test');
 valDir   = fullfile(datasetDir, 'validation');
@@ -90,7 +90,7 @@ for i = 1:numSamples
     % Generate heatmap
     %% ---------------------------------
 
-    [y_ell, tau, phi] = get_radar_response(p_target, alpha, SNR);
+    [y_ell, tau, phi] = get_radar_response_noisy(p_target, alpha, SNR);
 
     %% ---------------------------------
     % Normalize heatmap

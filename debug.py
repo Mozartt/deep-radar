@@ -6,6 +6,7 @@ from model.delay_net import DelayNet
 import torch
 from data_loaders.my_dataloader import RadarMatDataset
 from torch.utils.data import DataLoader
+import numpy as np
 
 def compute_tau_stats(dataset):
     """Compute per-feature mean and std of tau over the full training set."""
@@ -66,32 +67,64 @@ if __name__ == '__main__':
     Fs = 5e7
     Ts = 1 / Fs
     complex_signal = torch.complex(signal[0], signal[1])  # [M, N]
-    
-    mask = (complex_signal.detach() != 0)
-    col_indices = torch.arange(complex_signal.shape[1], dtype=torch.float32)
-    masked_indices = torch.where(mask, col_indices, torch.nan)
-    ref_idx = torch.round(torch.nanmean(masked_indices, dim=1, keepdim=True))
-    
-    t_ref = ref_idx * Ts # nTs
+
     # 1000 samples of pure beat n T2
-    beta_exp = torch.exp(1j * 2 * torch.pi * a * tau_pred[:, :, None] * (Ts * torch.arange(1000) - t_ref))  # [1, M, N]
+    beta_exp = torch.exp(1j * 2 * torch.pi * a * tau_pred[:, :, None] * Ts * torch.arange(1000))  # [1, M, N]
     beta_exp = beta_exp.squeeze(0)  # [M, N]
     # remvoe beat freq from input signal
     
     phase_only = complex_signal * beta_exp
 
+    # keep only non-zero sample for phase_only
+    first_nz_idx = torch.zeros(phase_only.shape[0])
+    for m in range(phase_only.shape[0]):
+        non_zero_idx = torch.nonzero(phase_only[m], as_tuple=True)[0]
+        first_nz_idx[m] = non_zero_idx[0]
+    max_nz_idx = int(first_nz_idx.max().item())
+    phase_only_nz = phase_only[:, max_nz_idx:]  # [M, N'] N' <= 1000
+
+    theta = torch.angle(phase_only_nz)  # [B, M, N]
+    theta_np = theta.detach().cpu().numpy()
+    theta_unwrapped_np = np.unwrap(theta_np, axis=-1)
+
+    theta_unwrapped = torch.tensor(
+        theta_unwrapped_np
+    )  # [B, M, N]
+
+    w = torch.ones_like(theta_unwrapped)
+    eps = 1e-12
+    N=1000
+    w_sum = w.sum(dim=-1, keepdim=True) + eps
+    n = torch.arange(N)
+    n_view = n.view(1, 1, N)
+    n_bar = (n_view).sum(dim=-1, keepdim=True) / w_sum
+    theta_bar = (theta_unwrapped).sum(dim=-1, keepdim=True) / w_sum
+    n_centered = n_view - n_bar
+    theta_centered = theta_unwrapped - theta_bar
+    numerator = (n_centered * theta_centered).sum(dim=-1)
+    denominator = (n_centered ** 2).sum(dim=-1) + eps
+
+    omega_hat = numerator / denominator  # [B, M], rad/sample
+    delta_tau_hat = omega_hat / (2 * torch.pi * a * Ts)
+
+    tau_refined = tau_pred - delta_tau_hat
+    beta_exp = torch.exp(1j * 2 * torch.pi * a * tau_refined[:, None] * Ts * torch.arange(1000))  # [1, M, N]
+    beta_exp = beta_exp.squeeze(0)  # [M, N]
+    # remvoe beat freq from input signal
+    
+    phase_only = complex_signal * beta_exp
     # phase estimator
     
-    mean_gamma = torch.sum(phase_only)  # [M] average over N' to get per-receiver phase estimate
-    non_zero_cnt = torch.sum(phase_only > 0, dim=1)  # [M] count of non-zero samples per receiver
-    mean_gamma /= non_zero_cnt  # [M] average over non-zero samples per receiver
-    mean_gamma *= torch.exp(1j * 2 * torch.pi * a * tau_pred * t_ref)  # [M] remove the effect of delay from the phase estimate
-    phi_hat = torch.angle(mean_gamma)  # [M] phase estimate in radians
-    cos_pred = torch.cos(phi_hat)  # [M]
-    sin_pred = torch.sin(phi_hat)  # [M]
-    cos_phi_0, sin_phi_0 = cos_pred[0], sin_pred[0]              # [B]
-    cos_delta = cos_pred * cos_phi_0 + sin_pred * sin_phi_0  # [B, M]
-    sin_delta = sin_pred * cos_phi_0 - cos_pred * sin_phi_0  # [B, M]
+    # mean_gamma = torch.sum(phase_only)  # [M] average over N' to get per-receiver phase estimate
+    # non_zero_cnt = torch.sum(phase_only > 0, dim=1)  # [M] count of non-zero samples per receiver
+    # mean_gamma /= non_zero_cnt  # [M] average over non-zero samples per receiver
+    # mean_gamma *= torch.exp(1j * 2 * torch.pi * a * tau_pred * t_ref)  # [M] remove the effect of delay from the phase estimate
+    # phi_hat = torch.angle(mean_gamma)  # [M] phase estimate in radians
+    # cos_pred = torch.cos(phi_hat)  # [M]
+    # sin_pred = torch.sin(phi_hat)  # [M]
+    # cos_phi_0, sin_phi_0 = cos_pred[0], sin_pred[0]              # [B]
+    # cos_delta = cos_pred * cos_phi_0 + sin_pred * sin_phi_0  # [B, M]
+    # sin_delta = sin_pred * cos_phi_0 - cos_pred * sin_phi_0  # [B, M]
 
     cos_gt = torch.cos(phi)  # [M]
     sin_gt = torch.sin(phi)  # [M]

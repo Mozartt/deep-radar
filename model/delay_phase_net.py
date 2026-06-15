@@ -3,101 +3,113 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class ConvBlock(nn.Module):
-    def __init__(self, in_ch, out_ch):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, 3, padding=1),
-            nn.BatchNorm2d(out_ch),
-            nn.LeakyReLU(0.1, inplace=True),
-
-            nn.Conv2d(out_ch, out_ch, 3, padding=1),
-            nn.BatchNorm2d(out_ch),
-            nn.LeakyReLU(0.1, inplace=True),
-        )
-
-    def forward(self, x):
-        return self.net(x)
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 
-class DelayPhaseNet(nn.Module):
+class BetaCorrectionHead(nn.Module):
     """
+    Small correction network.
+
     Input:
-        x: [B, 2, M, N]
+        z_ri:        [B, 2, M, N]  de-beated I/Q signal
+        beta_coh_ri: [B, M, 2]     coherent beta estimate
 
     Output:
-        tau:     [B, M]
-        cos_phi: [B, M]
-        sin_phi: [B, M]
+        corr_ri:     [B, M, 2]     unit correction phasor
+        confidence:  [B, M]        confidence in beta estimate
     """
 
-    def __init__(self, M=40, base_ch=32, hidden_ch=128, n_fft=1024):
+    def __init__(self, hidden_ch=64, mlp_dim=128):
         super().__init__()
 
-        self.M = M
-        self.n_fft = n_fft
-
-        self.encoder = nn.Sequential(
-            ConvBlock(3, base_ch),
-
-            nn.MaxPool2d(kernel_size=(1, 2)),
-
-            ConvBlock(base_ch, base_ch * 2),
-
-            nn.MaxPool2d(kernel_size=(1, 2)),
-
-            ConvBlock(base_ch * 2, base_ch * 4),
+        # Per-receiver Conv1D over time.
+        # Important: no stride, no maxpool. We preserve phase structure.
+        self.time_encoder = nn.Sequential(
+            nn.Conv1d(2, hidden_ch, kernel_size=7, padding=3),
+            nn.GELU(),
+            nn.Conv1d(hidden_ch, hidden_ch, kernel_size=7, padding=3),
+            nn.GELU(),
+            nn.Conv1d(hidden_ch, hidden_ch, kernel_size=7, padding=3),
+            nn.GELU(),
         )
 
-        self.pool = nn.AdaptiveAvgPool2d((M, 1))
+        # Features:
+        # hidden_ch from Conv1D
+        # beta_coh real/imag = 2
+        # coherence = 1
+        # residual energy = 1
+        feature_dim = hidden_ch + 2 + 1 + 1
 
-        # Keep this EXACTLY like your old DelayNet.
-        self.delay_head = nn.Sequential(
-            nn.Conv2d(base_ch * 4, hidden_ch, kernel_size=1),
-            nn.LeakyReLU(0.1, inplace=True),
-            nn.Conv2d(hidden_ch, 1, kernel_size=1)
+        self.mlp = nn.Sequential(
+            nn.Linear(feature_dim, mlp_dim),
+            nn.GELU(),
+            nn.Linear(mlp_dim, mlp_dim),
+            nn.GELU(),
         )
 
-        # New parallel phase head.
-        self.phase_head = nn.Sequential(
-            nn.Conv2d(base_ch * 4, hidden_ch, kernel_size=1),
-            nn.LeakyReLU(0.1, inplace=True),
-            nn.Conv2d(hidden_ch, 2, kernel_size=1)
-        )
+        # Predict small correction around identity phasor [1, 0].
+        self.corr_head = nn.Linear(mlp_dim, 2)
 
-    def forward(self, x):
-        # x: [B, 2, M, N]
-        z = torch.complex(
-            x[:, 0, :, :].float(),
-            x[:, 1, :, :].float()
-        )  # [B, M, N]
+        # Predict confidence in [0, 1].
+        self.conf_head = nn.Linear(mlp_dim, 1)
 
-        Z = torch.fft.fft(z, n=self.n_fft, dim=-1, norm="forward")
-        Z = torch.fft.fftshift(Z, dim=-1)
+        # Initialize correction head near zero.
+        # Then corr ≈ [1, 0] at the beginning,
+        # so beta_hat starts close to beta_coh.
+        nn.init.zeros_(self.corr_head.weight)
+        nn.init.zeros_(self.corr_head.bias)
 
-        # Same convention as your original model.
-        Z = Z[:, :, :self.n_fft // 2]  # [B, M, 512]
+    def forward(self, z_ri, beta_coh_ri):
+        B, _, M, N = z_ri.shape
 
-        mag = torch.log1p(Z.abs())
+        # Convert de-beated signal to complex.
+        z = torch.complex(z_ri[:, 0], z_ri[:, 1])  # [B, M, N]
 
-        x_fft = torch.stack(
-            [Z.real, Z.imag, mag],
-            dim=1
-        ).to(x.dtype)  # [B, 3, M, 512]
+        # Conv1D per receiver.
+        x = z_ri.permute(0, 2, 1, 3)     # [B, M, 2, N]
+        x = x.reshape(B * M, 2, N)       # [B*M, 2, N]
 
-        feat = self.encoder(x_fft)  # [B, C, M, N']
-        feat = self.pool(feat)      # [B, C, M, 1]
+        h = self.time_encoder(x)         # [B*M, hidden_ch, N]
 
-        tau = self.delay_head(feat)       # [B, 1, M, 1]
-        tau = tau.squeeze(1).squeeze(-1)  # [B, M]
+        # Mean over time is okay here because signal was already de-beated.
+        h = h.mean(dim=-1)               # [B*M, hidden_ch]
+        h = h.view(B, M, -1)             # [B, M, hidden_ch]
 
-        phase = self.phase_head(feat)     # [B, 2, M, 1]
-        phase = phase.squeeze(-1)         # [B, 2, M]
+        # Coherence feature:
+        # If de-beating was good, z[n] should be almost constant,
+        # so |mean(z)| / mean(|z|) should be close to 1.
+        z_mean = z.mean(dim=-1)                              # [B, M]
+        coherence = z_mean.abs() / (z.abs().mean(dim=-1) + 1e-8)
+        coherence = coherence.unsqueeze(-1)                  # [B, M, 1]
 
-        # Enforce cos/sin vector on unit circle.
-        phase = F.normalize(phase, p=2, dim=1, eps=1e-8)
+        # Residual energy after coherent averaging.
+        residual = z - z_mean.unsqueeze(-1)
+        residual_energy = torch.sqrt((residual.abs() ** 2).mean(dim=-1) + 1e-8)
+        residual_energy = residual_energy.unsqueeze(-1)      # [B, M, 1]
 
-        cos_phi = phase[:, 0, :]          # [B, M]
-        sin_phi = phase[:, 1, :]          # [B, M]
+        features = torch.cat(
+            [
+                h,
+                beta_coh_ri,
+                coherence,
+                residual_energy,
+            ],
+            dim=-1,
+        )  # [B, M, feature_dim]
 
-        return tau, cos_phi, sin_phi
+        q = self.mlp(features)
+
+        # Predict correction as residual around identity phasor.
+        delta = self.corr_head(q)  # [B, M, 2]
+
+        identity = torch.zeros_like(delta)
+        identity[..., 0] = 1.0
+
+        corr_ri = identity + delta
+        corr_ri = F.normalize(corr_ri, dim=-1)
+
+        confidence = torch.sigmoid(self.conf_head(q)).squeeze(-1)  # [B, M]
+
+        return corr_ri, confidence
