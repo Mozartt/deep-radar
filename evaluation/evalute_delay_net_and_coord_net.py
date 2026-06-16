@@ -91,26 +91,46 @@ def refine_tau(pred_tau, signal):
     theta = torch.angle(phase_only_nz)              # [B, M, N']
     theta_np = theta.detach().cpu().numpy()
     theta_unwrapped_np = np.unwrap(theta_np, axis=-1)
-    theta_unwrapped = torch.tensor(
-        theta_unwrapped_np
-    )  # [B, M, N']
+    theta_unwrapped = torch.from_numpy(
+        theta_np
+    ).float()  # [B, M, N']
 
-    w = torch.ones_like(theta_unwrapped)
+    # w = torch.ones_like(theta_unwrapped)
+    # eps = 1e-12
+    # N_actual = theta_unwrapped.shape[-1]
+    # w_sum = w.sum(dim=-1, keepdim=True) + eps
+    # n = torch.arange(N_actual, device=theta_unwrapped.device)
+    # n_view = n.view(1, 1, N_actual)
+    # n_bar = (n_view).sum(dim=-1, keepdim=True) / w_sum
+    # theta_bar = (theta_unwrapped).sum(dim=-1, keepdim=True) / w_sum
+    # n_centered = n_view - n_bar
+    # theta_centered = theta_unwrapped - theta_bar
+    # numerator = (n_centered * theta_centered).sum(dim=-1)
+    # denominator = (n_centered ** 2).sum(dim=-1) + eps
+    # omega_hat = numerator / denominator  # [B, M], rad/sample
+
+    #phase_only_nz = phase_only_nz.detach().cpu().numpy()  # [B, M, N']
+    #prod = phase_only_nz[:, :, 1:]* np.conj(phase_only_nz[:, :, :-1])
+    #omega_hat = np.angle(np.sum(prod))
+    # try multi-lag 
+    phase_only_nz = phase_only_nz.detach().cpu().numpy()
     eps = 1e-12
-    N_actual = theta_unwrapped.shape[-1]
-    w_sum = w.sum(dim=-1, keepdim=True) + eps
-    n = torch.arange(N_actual, device=theta_unwrapped.device)
-    n_view = n.view(1, 1, N_actual)
-    n_bar = (n_view).sum(dim=-1, keepdim=True) / w_sum
-    theta_bar = (theta_unwrapped).sum(dim=-1, keepdim=True) / w_sum
-    n_centered = n_view - n_bar
-    theta_centered = theta_unwrapped - theta_bar
-    numerator = (n_centered * theta_centered).sum(dim=-1)
-    denominator = (n_centered ** 2).sum(dim=-1) + eps
+    L=32
+    lags = np.arange(1, L + 1)
+    R_list = []
+    for ell in lags:
+        R_ell = np.sum(phase_only_nz[:, :, ell:] * np.conj(phase_only_nz[:, :, :-ell]), axis=-1)
+        R_list.append(R_ell)
+    R = np.stack(R_list, axis=-1)  # [B, M, L]
+    theta = np.unwrap(np.angle(R), axis=-1)
+    weights = np.abs(R) + eps
+    numerator = np.sum(weights * lags[None, None, :] * theta, axis=-1)
+    denominator = np.sum(weights * lags[None, None, :] ** 2, axis=-1) + eps
 
-    omega_hat = numerator / denominator  # [B, M], rad/sample
+    omega_hat = numerator / denominator
+
     delta_tau_hat = omega_hat / (2 * torch.pi * a * Ts)
-    delta_tau_hat = delta_tau_hat.to(pred_tau.device)
+    delta_tau_hat = torch.tensor(delta_tau_hat, dtype=torch.float32, device=pred_tau.device)
     refined_tau = pred_tau - delta_tau_hat
     # refined_tau[:, :, None]: [B, M, 1] → broadcast → [B, M, 1000]
     beta_exp = torch.exp(1j * 2 * torch.pi * a * refined_tau[:, :, None] * Ts * torch.arange(1000, device=refined_tau.device))  # [B, M, N]

@@ -83,8 +83,8 @@ def main():
     print(f"Using {'GPU: ' + torch.cuda.get_device_name(0) if use_cuda else 'CPU'}")
 
     # ── Dataset ──────────────────────────────────────────────
-    train_dataset = RadarMatDataset(root_dir="D:\\radar-dataset\\train")
-    test_dataset   = RadarMatDataset(root_dir="D:\\radar-dataset\\test")
+    train_dataset = RadarMatDataset(root_dir="D:\\radar-dataset-noisy\\train")
+    test_dataset   = RadarMatDataset(root_dir="D:\\radar-dataset-noisy\\test")
 
     print("Computing tau normalisation stats from train set...")
     tau_mean, tau_std = compute_tau_stats(train_dataset)
@@ -99,7 +99,7 @@ def main():
     )
 
     # ── Load model ───────────────────────────────────────────
-    ckpt  = torch.load("best_radar_model.pt",
+    ckpt  = torch.load("delay_net_noisy.pt",
                        map_location=device, weights_only=True)
     model = DelayNet(M=M).to(device)
     model.load_state_dict(ckpt["model_state_dict"])

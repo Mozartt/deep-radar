@@ -20,7 +20,7 @@ def compute_dataset_stats(dataset):
     """Compute per-feature mean and std of tau and coord[:2] over the full dataset."""
     loader = DataLoader(dataset, batch_size=512, shuffle=False, num_workers=4)
     all_tau, all_coord = [], []
-    for signal, heatmap, coord, tau in loader:
+    for signal, heatmap, coord, tau, phi in loader:
         all_tau.append(tau.float())
         all_coord.append(coord.float()[..., :2])
     all_tau = torch.cat(all_tau, dim=0)      # [N, M]
@@ -35,24 +35,18 @@ def compute_dataset_stats(dataset):
 
 
 
-def train_one_epoch(model,delay_net_model, loader, optimizer, device, scaler, use_amp,
+def train_one_epoch(model, loader, optimizer, device, scaler, use_amp,
                     tau_mean, tau_std, coord_mean, coord_std):
     model.train()
 
     total_loss = 0.0
 
-    for signal, heatmap, coord, tau in loader:
+    for signal, heatmap, coord, tau, phi in loader:
 
         tau = tau.to(device, non_blocking=True).float()
 
         coord = coord.to(device, non_blocking=True).float()[..., :2]
-        #tau_norm = tau * 1e6
 
-        # evaluate delay net to get tau_norm
-        #with torch.no_grad():
-            #signal = signal.to(device, non_blocking=True).float()
-            #pred_tau_norm = delay_net_model(signal)  # [B, M]
-        
         optimizer.zero_grad(set_to_none=True)
 
         with torch.amp.autocast('cuda', enabled=use_amp):
@@ -75,20 +69,16 @@ def train_one_epoch(model,delay_net_model, loader, optimizer, device, scaler, us
 # ============================================================
 
 @torch.no_grad()
-def validate(model, delay_net_model, loader, device, use_amp,
+def validate(model, loader, device, use_amp,
              tau_mean, tau_std, coord_mean, coord_std):
     model.eval()
 
     total_loss = 0.0
 
-    for signal, heatmap, coord, tau in loader:
+    for signal, heatmap, coord, tau, phi in loader:
 
         coord = coord.to(device, non_blocking=True).float()[..., :2]
         tau = tau.to(device, non_blocking=True).float()
-        # evaluate delay net to get tau_norm
-        #with torch.no_grad():
-        #    signal = signal.to(device, non_blocking=True).float()
-        #    pred_tau_norm = delay_net_model(signal)  # [B, M]
 
         with torch.amp.autocast('cuda', enabled=use_amp):
             tau_norm = (tau - tau_mean) / tau_std
@@ -124,7 +114,7 @@ def main():
     # -------------------------
 
     batch_size = 64
-    epochs = 60
+    epochs = 50
 
     lr = 1e-3
     M= 40
@@ -133,11 +123,11 @@ def main():
     # -------------------------
 
     train_dataset = RadarMatDataset(
-        root_dir="D:\\radar-dataset\\train",
+        root_dir="D:\\radar-dataset-noisy\\train",
     )
 
     val_dataset = RadarMatDataset(
-        root_dir="D:\\radar-dataset\\validation",
+        root_dir="D:\\radar-dataset-noisy\\validation",
     )
 
     print("Computing normalisation statistics from train set...")
@@ -168,11 +158,6 @@ def main():
     )
 
     # delay net
-    ckpt  = torch.load("best_radar_model_samples_2_tau_clean.pt",
-                       map_location=device, weights_only=True)
-    delay_net_model = DelayNet(M=M).to(device)
-    delay_net_model.load_state_dict(ckpt["model_state_dict"])
-    delay_net_model.eval()
 
     # -------------------------
     # Model
@@ -200,14 +185,14 @@ def main():
     for epoch in range(1, epochs + 1):
 
         train_loss = train_one_epoch(
-            model, delay_net_model, train_loader, optimizer, device, scaler, use_amp,
+            model, train_loader, optimizer, device, scaler, use_amp,
             tau_mean, tau_std, coord_mean, coord_std,
         )
 
         scheduler.step()  # must come after optimizer.step() (which is inside train_one_epoch)
 
         val_loss = validate(
-            model, delay_net_model, val_loader, device, use_amp,
+            model, val_loader, device, use_amp,
             tau_mean, tau_std, coord_mean, coord_std,
         )
 

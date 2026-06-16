@@ -113,11 +113,11 @@ def main():
     # -------------------------
 
     train_dataset = RadarMatDataset(
-        root_dir="D:\\radar-dataset\\train",
+        root_dir="D:\\radar-dataset-noisy\\train",
     )
 
     val_dataset = RadarMatDataset(
-        root_dir="D:\\radar-dataset\\validation",
+        root_dir="D:\\radar-dataset-noisy\\validation",
     )
 
     print("Computing tau normalization statistics from train set...")

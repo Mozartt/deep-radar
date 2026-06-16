@@ -33,7 +33,7 @@ def get_activation(name):
     return hook
 
 if __name__ == '__main__':
-    dataset = RadarMatDataset(root_dir="D:\\radar-dataset\\train")
+    dataset = RadarMatDataset(root_dir="D:\\radar-dataset\\test")
     signal, heatmap, coord, tau, phi = dataset[0]
 
     ckpt = torch.load("delay_net.pt", map_location="cpu", weights_only=True)
@@ -88,7 +88,7 @@ if __name__ == '__main__':
     theta_unwrapped_np = np.unwrap(theta_np, axis=-1)
 
     theta_unwrapped = torch.tensor(
-        theta_unwrapped_np
+        theta_unwrapped_np, dtype=torch.float32, device=phase_only.device
     )  # [B, M, N]
 
     w = torch.ones_like(theta_unwrapped)
