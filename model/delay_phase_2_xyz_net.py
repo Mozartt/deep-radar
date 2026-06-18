@@ -3,7 +3,7 @@ from math import tau
 import torch
 import torch.nn as nn
 
-class TauPhase2PredictionNet(nn.Module):
+class TauPhase2PredictionNet3D(nn.Module):
     """
     Input:
         tau: [B, M]
@@ -15,12 +15,12 @@ class TauPhase2PredictionNet(nn.Module):
             If shape is [B, M-1], it is assumed to contain receivers 1..M-1.
 
     Output:
-        xy: [B, 2]
+        xyz: [B, 3]
             predicted target position.
-            I recommend training this in normalized xy coordinates.
+            I recommend training this in normalized xyz coordinates.
     """
 
-    def __init__(self, M, hidden_dim=256, dropout=0.05):
+    def __init__(self, M, hidden_dim=256):
         super().__init__()
 
         self.tau_branch = nn.Sequential(
@@ -53,7 +53,7 @@ class TauPhase2PredictionNet(nn.Module):
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
 
-            nn.Linear(hidden_dim, 2)
+            nn.Linear(hidden_dim, 3)
         )
 
     def forward(self, tau, cos_dphi, sin_dphi):

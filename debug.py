@@ -1,134 +1,258 @@
 import os
+import sys
+from pathlib import Path
+import time
 
-os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE" 
-from model.phase_net import PhaseOnlyNet
-from model.delay_net import DelayNet
-import torch
-from data_loaders.my_dataloader import RadarMatDataset
-from torch.utils.data import DataLoader
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+import matplotlib.pyplot as plt
 import numpy as np
+import torch
+from torch.utils.data import DataLoader
 
-def compute_tau_stats(dataset):
-    """Compute per-feature mean and std of tau over the full training set."""
-    loader = DataLoader(dataset, batch_size=512, shuffle=False, num_workers=4)
-    all_tau = []
-    for signal, heatmap, coord, tau, phi in loader:
-        all_tau.append(tau.float())
-    all_tau = torch.cat(all_tau, dim=0)  # [N, M]
-    tau_mean = all_tau.mean(dim=0)
-    tau_std = all_tau.std(dim=0)
-    # Avoid exploding normalized error for near-constant receivers.
-    std_floor = torch.clamp(tau_std.mean() * 0.1, min=1e-6)
-    tau_std = tau_std.clamp(min=std_floor)
-    return tau_mean, tau_std
-
-activation = {}
-
-def get_activation(name):
-    def hook(model, input, output):
-        # .detach() prevents tracking history for gradients
-        # .cpu() ensures it can be converted to a NumPy array for plotting
-        activation[name] = output.detach().cpu()
-        activation["input"] = input[0].detach().cpu()
-    return hook
-
-if __name__ == '__main__':
-    dataset = RadarMatDataset(root_dir="D:\\radar-dataset\\test")
-    signal, heatmap, coord, tau, phi = dataset[0]
-
-    ckpt = torch.load("delay_net.pt", map_location="cpu", weights_only=True)
-
-    model = DelayNet(M=40).to("cpu")
-    model.load_state_dict(ckpt["model_state_dict"])
-
-    #model.encoder.register_forward_hook(get_activation("encoder"))
+from model.delay_net import DelayNet
+from model.delay_phase_2_xyz_net import TauPhase2PredictionNet3D
+from data_loaders.my_dataloader import RadarMatDataset
 
 
-    with torch.no_grad():
-        pred = model(signal.unsqueeze(0).float())
+# ─────────────────────────────────────────────────────────────
+# Stats helpers — must match each trainer's formula exactly
+# ─────────────────────────────────────────────────────────────
+def wrap_phase(phi):
+    return torch.atan2(torch.sin(phi), torch.cos(phi))
 
-    #feature_map = activation["encoder"]  # [C, M, N'] C=128, M=40, N'=128
-    #input = activation["input"]  # [2, M, N] = [2, 40, 1024]
+def moving_average(x, L):
+    """
+    x: [N]
+    returns moving average with length close to original
+    """
+    kernel = np.ones(L) / L
+    return np.convolve(x, kernel, mode="same")
 
-    # plot first channel first reciever M=1 
-    #import matplotlib.pyplot as plt
+def estimate_chirp_start_single(y, L=128, guard_edges=True):
+    y = y[:400] # limit to first 400 samples for speed
+    power = np.abs(y) ** 2
+    left_avg = moving_average(power, L)
+    right_avg = moving_average(power[::-1], L)[::-1]
+    score = right_avg - left_avg
+    if guard_edges:
+        score[:L] = -np.inf
+        score[-L:] = -np.inf
+    n0 = int(np.argmax(score))
+    return n0, score
 
-    # plt.figure()
-    # plt.imshow(feature_map[0,0, :, :].numpy().reshape(40,128), aspect='auto')
+def estimate_chirp_starts(Y, L=128):
+    """
+    Fully vectorised chirp-start estimator — no Python loops.
+    Y  : [B, M, N] tensor or numpy array
+    Returns n0 : [B, M] int array
 
-    #plt.figure()
-    #plt.plot(input[0,0, 0, :].numpy().reshape(1,512).squeeze())
-    tau_pred_norm = model(signal.unsqueeze(0).float()) # unsqeeze to add batch dimension → [1, M]
-    tau_mean, tau_std = compute_tau_stats(dataset)
-    tau_pred = tau_pred_norm * tau_std + tau_mean  # denormalize to
+    Algorithm: score[i] = forward_avg[i] - backward_avg[i] computed via
+    cumulative sums (identical result to the per-row np.convolve approach).
+    """
+    if isinstance(Y, torch.Tensor):
+        Y = Y.detach().cpu().numpy()
+    B, M, N = Y.shape
+    trim  = min(400, N)
+    power = np.abs(Y[:, :, :trim]) ** 2            # [B, M, trim]
 
-    # exp( 1i * 2 * pi * a * tau' * Ts * n)
+    pad = np.zeros((B, M, L - 1))
+
+    # Backward-looking average: mean of the L samples ending at each position
+    xp_l  = np.concatenate([pad, power], axis=-1)                      # [B, M, trim+L-1]
+    cs_l  = np.cumsum(xp_l, axis=-1)
+    cs_l0 = np.concatenate([np.zeros((B, M, 1)), cs_l], axis=-1)       # [B, M, trim+L]
+    left_avg = (cs_l0[:, :, L:] - cs_l0[:, :, :-L]) / L               # [B, M, trim]
+
+    # Forward-looking average: same on time-reversed signal, then flip back
+    xp_r      = np.concatenate([pad, power[:, :, ::-1]], axis=-1)
+    cs_r      = np.cumsum(xp_r, axis=-1)
+    cs_r0     = np.concatenate([np.zeros((B, M, 1)), cs_r], axis=-1)
+    right_avg = ((cs_r0[:, :, L:] - cs_r0[:, :, :-L]) / L)[:, :, ::-1]  # [B, M, trim]
+
+    score = right_avg - left_avg
+    score[:, :, :L]  = -np.inf
+    score[:, :, -L:] = -np.inf
+
+    return np.argmax(score, axis=-1).astype(int)                        # [B, M]
+
+def refine_tau(pred_tau, signal):
     a = 1e13 # chirp slope 
     Fs = 5e7
     Ts = 1 / Fs
-    complex_signal = torch.complex(signal[0], signal[1])  # [M, N]
+    complex_signal = torch.complex(signal[:,0,:,:], signal[:,1,:,:])  # [B, M, N]
+    # pred_tau[:, :, None]: [B, M, 1] → broadcast with arange → [B, M, 1000]
+    beta_exp = torch.exp(1j * 2 * torch.pi * a * pred_tau[:, :, None] * Ts * torch.arange(1000, device=pred_tau.device))
+    phase_only = complex_signal * beta_exp  # de-beat signal: [B, M, N]
 
-    # 1000 samples of pure beat n T2
-    beta_exp = torch.exp(1j * 2 * torch.pi * a * tau_pred[:, :, None] * Ts * torch.arange(1000))  # [1, M, N]
-    beta_exp = beta_exp.squeeze(0)  # [M, N]
-    # remvoe beat freq from input signal
-    
-    phase_only = complex_signal * beta_exp
-
-    # keep only non-zero sample for phase_only
-    first_nz_idx = torch.zeros(phase_only.shape[0])
-    for m in range(phase_only.shape[0]):
-        non_zero_idx = torch.nonzero(phase_only[m], as_tuple=True)[0]
-        first_nz_idx[m] = non_zero_idx[0]
-    max_nz_idx = int(first_nz_idx.max().item())
-    phase_only_nz = phase_only[:, max_nz_idx:]  # [M, N'] N' <= 1000
-
-    theta = torch.angle(phase_only_nz)  # [B, M, N]
+    # Find the latest chirp start across all receivers and batch items
+    n0 = estimate_chirp_starts(complex_signal, L=128)  # [B, M]
+    max_nz_idx = int(n0.max())  # scalar
+    phase_only_nz = phase_only[:, :, max_nz_idx:]  # [B, M, N']
+    theta = torch.angle(phase_only_nz)              # [B, M, N']
     theta_np = theta.detach().cpu().numpy()
     theta_unwrapped_np = np.unwrap(theta_np, axis=-1)
+    theta_unwrapped = torch.from_numpy(
+        theta_np
+    ).float()  # [B, M, N']
 
-    theta_unwrapped = torch.tensor(
-        theta_unwrapped_np, dtype=torch.float32, device=phase_only.device
-    )  # [B, M, N]
+    # w = torch.ones_like(theta_unwrapped)
+    # eps = 1e-12
+    # N_actual = theta_unwrapped.shape[-1]
+    # w_sum = w.sum(dim=-1, keepdim=True) + eps
+    # n = torch.arange(N_actual, device=theta_unwrapped.device)
+    # n_view = n.view(1, 1, N_actual)
+    # n_bar = (n_view).sum(dim=-1, keepdim=True) / w_sum
+    # theta_bar = (theta_unwrapped).sum(dim=-1, keepdim=True) / w_sum
+    # n_centered = n_view - n_bar
+    # theta_centered = theta_unwrapped - theta_bar
+    # numerator = (n_centered * theta_centered).sum(dim=-1)
+    # denominator = (n_centered ** 2).sum(dim=-1) + eps
+    # omega_hat = numerator / denominator  # [B, M], rad/sample
 
-    w = torch.ones_like(theta_unwrapped)
+    #phase_only_nz = phase_only_nz.detach().cpu().numpy()  # [B, M, N']
+    #prod = phase_only_nz[:, :, 1:]* np.conj(phase_only_nz[:, :, :-1])
+    #omega_hat = np.angle(np.sum(prod))
+    # try multi-lag 
+    phase_only_nz = phase_only_nz.detach().cpu().numpy()
     eps = 1e-12
-    N=1000
-    w_sum = w.sum(dim=-1, keepdim=True) + eps
-    n = torch.arange(N)
-    n_view = n.view(1, 1, N)
-    n_bar = (n_view).sum(dim=-1, keepdim=True) / w_sum
-    theta_bar = (theta_unwrapped).sum(dim=-1, keepdim=True) / w_sum
-    n_centered = n_view - n_bar
-    theta_centered = theta_unwrapped - theta_bar
-    numerator = (n_centered * theta_centered).sum(dim=-1)
-    denominator = (n_centered ** 2).sum(dim=-1) + eps
+    L=32
+    lags = np.arange(1, L + 1)
+    R_list = []
+    for ell in lags:
+        R_ell = np.sum(phase_only_nz[:, :, ell:] * np.conj(phase_only_nz[:, :, :-ell]), axis=-1)
+        R_list.append(R_ell)
+    R = np.stack(R_list, axis=-1)  # [B, M, L]
+    theta = np.unwrap(np.angle(R), axis=-1)
+    weights = np.abs(R) + eps
+    numerator = np.sum(weights * lags[None, None, :] * theta, axis=-1)
+    denominator = np.sum(weights * lags[None, None, :] ** 2, axis=-1) + eps
 
-    omega_hat = numerator / denominator  # [B, M], rad/sample
+    omega_hat = numerator / denominator
+
     delta_tau_hat = omega_hat / (2 * torch.pi * a * Ts)
-
-    tau_refined = tau_pred - delta_tau_hat
-    beta_exp = torch.exp(1j * 2 * torch.pi * a * tau_refined[:, None] * Ts * torch.arange(1000))  # [1, M, N]
-    beta_exp = beta_exp.squeeze(0)  # [M, N]
-    # remvoe beat freq from input signal
+    delta_tau_hat = torch.tensor(delta_tau_hat, dtype=torch.float32, device=pred_tau.device)
+    refined_tau = pred_tau - delta_tau_hat
+    # refined_tau[:, :, None]: [B, M, 1] → broadcast → [B, M, 1000]
+    beta_exp = torch.exp(1j * 2 * torch.pi * a * refined_tau[:, :, None] * Ts * torch.arange(1000, device=refined_tau.device))  # [B, M, N]
+    # remove beat frequency from input signal
+    phase_only = complex_signal * beta_exp                        # [B, M, N]
+    phase_only_nz = phase_only[:, :, max_nz_idx:]                 # [B, M, N']
+    phi_hat = torch.angle(phase_only_nz).mean(dim=-1)             # [B, M]
     
-    phase_only = complex_signal * beta_exp
-    # phase estimator
-    
-    # mean_gamma = torch.sum(phase_only)  # [M] average over N' to get per-receiver phase estimate
-    # non_zero_cnt = torch.sum(phase_only > 0, dim=1)  # [M] count of non-zero samples per receiver
-    # mean_gamma /= non_zero_cnt  # [M] average over non-zero samples per receiver
-    # mean_gamma *= torch.exp(1j * 2 * torch.pi * a * tau_pred * t_ref)  # [M] remove the effect of delay from the phase estimate
-    # phi_hat = torch.angle(mean_gamma)  # [M] phase estimate in radians
-    # cos_pred = torch.cos(phi_hat)  # [M]
-    # sin_pred = torch.sin(phi_hat)  # [M]
-    # cos_phi_0, sin_phi_0 = cos_pred[0], sin_pred[0]              # [B]
-    # cos_delta = cos_pred * cos_phi_0 + sin_pred * sin_phi_0  # [B, M]
-    # sin_delta = sin_pred * cos_phi_0 - cos_pred * sin_phi_0  # [B, M]
+    return refined_tau, phi_hat
 
-    cos_gt = torch.cos(phi)  # [M]
-    sin_gt = torch.sin(phi)  # [M]
-    cos_phi_0_gt, sin_phi_0_gt = cos_gt[0], sin_gt[0]              # [B]
-    cos_delta_gt = cos_gt * cos_phi_0_gt + sin_gt * sin_phi_0_gt  # [B, M]
-    sin_delta_gt = sin_gt * cos_phi_0_gt - cos_gt * sin_phi_0_gt  # [B, M]
-    a=5
+def compute_tau_stats(dataset):
+    """Matches train_delay_net_2d (std_floor applied)."""
+    loader = DataLoader(dataset, batch_size=512, shuffle=False, num_workers=4)
+    all_tau = []
+    for _, _, _, tau, _,_ in loader:
+        all_tau.append(tau.float())
+    all_tau = torch.cat(all_tau, dim=0)   # [N, M]
+    tau_mean = all_tau.mean(dim=0)
+    tau_std  = all_tau.std(dim=0)
+    std_floor = torch.clamp(tau_std.mean() * 0.1, min=1e-6)
+    tau_std   = tau_std.clamp(min=std_floor)
+    return tau_mean, tau_std
+
+
+def compute_coord_stats(dataset):
+    """Matches train_delay_2_pred (std_floor, same as compute_tau_stats)."""
+    loader = DataLoader(dataset, batch_size=512, shuffle=False, num_workers=4)
+    all_coord = []
+    for _, _, coord, _, _,_ in loader:
+        all_coord.append(coord.float()[..., :3])
+    all_coord = torch.cat(all_coord, dim=0)  # [N, 3]
+    return (
+        all_coord.mean(dim=0), all_coord.std(dim=0).clamp(min=1e-8),
+    )
+
+
+@torch.no_grad()
+def main():
+    device   = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cpu")  # force CPU for debugging
+    use_cuda = device.type == "cuda"
+    gpu_label = torch.cuda.get_device_name(0) if use_cuda else "CPU"
+    print(f"Using {gpu_label}")
+
+    # ── Dataset ──────────────────────────────────────────────
+    train_dataset = RadarMatDataset(root_dir="D:\\radar-dataset-3D-noisy\\train")
+    test_dataset   = RadarMatDataset(root_dir="D:\\radar-dataset-3D-noisy\\test")
+
+    print("Computing normalisation stats from train set...")
+    tau_mean_1, tau_std_1 = compute_tau_stats(train_dataset)       # delay_net stats (std_floor)
+    coord_mean, coord_std = compute_coord_stats(train_dataset)  # coord_net stats
+
+    tau_mean_1 = tau_mean_1.to(device)
+    tau_std_1  = tau_std_1.to(device)
+    coord_mean = coord_mean.to(device)
+    coord_std  = coord_std.to(device)
+    M = 40
+
+    test_loader = DataLoader(
+        test_dataset, batch_size=64, shuffle=False,
+        num_workers=4, pin_memory=use_cuda,
+    )
+
+    # ── Load models ──────────────────────────────────────────
+    ckpt_tau   = torch.load("delay_net_3d_noisy.pt",  map_location=device, weights_only=True)
+    ckpt_coord = torch.load("delay_phase_2_3D_noisy.pt",  map_location=device, weights_only=True)
+
+    delay_net = DelayNet(M=M).to(device)
+    delay_net.load_state_dict(ckpt_tau["model_state_dict"])
+    delay_net.eval()
+
+    coord_net = TauPhase2PredictionNet3D(M=40, hidden_dim=512).to(device)
+    coord_net.load_state_dict(ckpt_coord["model_state_dict"])
+    coord_net.eval()
+
+    print(f"Loaded delay_net  — saved at epoch {ckpt_tau.get('epoch', '?')}")
+    print(f"Loaded coord_net  — saved at epoch {ckpt_coord.get('epoch', '?')}")
+
+    # ── Inference ────────────────────────────────────────────
+    # Pipeline:
+    #   signal  →  delay_net  →  pred_tau_norm  (normalised w.r.t. tau_mean_1/std_1)
+    #           →  denorm to physical tau
+    #           →  renorm for coord_net  (w.r.t. tau_mean_2/std_2)
+    #           →  coord_net  →  pred_coord_norm
+    #           →  denorm to metres
+    errors_m = []   # per-sample Euclidean error in metres
+    errors_snr_below_7_db = []
+    errors_snr_above_7_db = []
+
+    #for signal, _, coord_gt, tau_gt, phi_gt, snr in test_loader:
+    signal, _, coord_gt, tau_gt, phi_gt, snr = train_dataset[0]
+    signal   = signal.to(device, non_blocking=True).float().unsqueeze(0)  # [1, 2, M, N]
+    coord_gt = coord_gt.to(device, non_blocking=True).float()[..., :3] 
+    tic = time.time()
+    # Stage 1 — signal → normalised tau
+    pred_tau_norm = delay_net(signal)                               # [B, M]
+
+    # Bridge — denorm from delay_net space → renorm for coord_net space
+    pred_tau_phys = pred_tau_norm * tau_std_1 + tau_mean_1          # [B, M] (physical)
+    refined_tau, phi = refine_tau(pred_tau_phys, signal)  # refine tau and estimate phi_hat
+
+    refined_tau_norm = (refined_tau - tau_mean_1) / tau_std_1  # renorm for coord_net
+    # Stage 2 — normalised tau → normalised coord
+
+    # calculate delta phi
+    phi_ref = phi[:, 0:1]                       # [B, 1]
+    delta_phi = phi - phi_ref                    # [B, M]
+
+    cos_target = torch.cos(delta_phi)
+    sin_target = torch.sin(delta_phi)
+
+    cos_target = cos_target.to(device)
+    sin_target = sin_target.to(device)
+
+    pred_coord_norm = coord_net(refined_tau_norm, cos_target, sin_target)                          # [B, 2]
+    pred_coord      = pred_coord_norm * coord_std + coord_mean      # [B, 2] metres
+    toc = time.time()
+    print(f"Inference time: {toc - tic:.4f} seconds")
+
+if __name__ == "__main__":
+    main()

@@ -10,7 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from model.delay_phase_2_pred_net import TauPhase2PredictionNet
+from model.delay_phase_2_xyz_net import TauPhase2PredictionNet3D
 from data_loaders.my_dataloader import RadarMatDataset
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
@@ -24,9 +24,9 @@ def compute_dataset_stats(dataset):
     all_tau, all_coord = [], []
     for signal, heatmap, coord, tau, phi in loader:
         all_tau.append(tau.float())
-        all_coord.append(coord.float()[..., :2])
+        all_coord.append(coord.float()[..., :3])
     all_tau = torch.cat(all_tau, dim=0)      # [N, M]
-    all_coord = torch.cat(all_coord, dim=0)  # [N, 2]
+    all_coord = torch.cat(all_coord, dim=0)  # [N, 3]
     tau_std = all_tau.std(dim=0)
     std_floor = torch.clamp(tau_std.mean() * 0.1, min=1e-6)
     tau_std = tau_std.clamp(min=std_floor)
@@ -52,7 +52,7 @@ def train_one_epoch(model_xy, loader, optimizer, device, scaler, use_amp,
         #cos_target = torch.cos(delta_phi)
         #sin_target = torch.sin(delta_phi)
         delta_phi = delta_phi.to(device, non_blocking=True).float()
-        coord = coord.to(device, non_blocking=True).float()[..., :2]
+        coord = coord.to(device, non_blocking=True).float()[..., :3]
         optimizer.zero_grad(set_to_none=True)
 
         with torch.amp.autocast('cuda', enabled=use_amp):
@@ -83,7 +83,7 @@ def validate(model, loader, device, use_amp,
 
     for signal, heatmap, coord, tau, phi in loader:
 
-        coord = coord.to(device, non_blocking=True).float()[..., :2]
+        coord = coord.to(device, non_blocking=True).float()[..., :3]
         tau = tau.to(device, non_blocking=True).float()
         phi = phi.to(device, non_blocking=True).float()
         phi_ref = phi[:, 0:1]                       # [B, 1]
@@ -134,11 +134,11 @@ def main():
     # -------------------------
 
     train_dataset = RadarMatDataset(
-        root_dir="D:\\radar-dataset-noisy\\train",
+        root_dir="D:\\radar-dataset-3D-noisy\\train",
     )
 
     val_dataset = RadarMatDataset(
-        root_dir="D:\\radar-dataset-noisy\\validation",
+        root_dir="D:\\radar-dataset-3D-noisy\\validation",
     )
 
     print("Computing normalisation statistics from train set...")
@@ -170,7 +170,7 @@ def main():
 
     # delay net
     
-    model_xy = TauPhase2PredictionNet(M=40, hidden_dim=512).to(device)
+    model_xy = TauPhase2PredictionNet3D(M=40, hidden_dim=512).to(device)
 
     # -------------------------
     # Model

@@ -10,7 +10,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from model.delay_phase_net import DelayPhaseNet
 from model.delay_net import DelayNet
 from data_loaders.my_dataloader import RadarMatDataset
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -314,7 +313,7 @@ def main():
         lr=lr,
         weight_decay=1e-4
     )
-    
+
     scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
 
     scheduler = ReduceLROnPlateau(

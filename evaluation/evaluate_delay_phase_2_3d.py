@@ -13,7 +13,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from model.delay_net import DelayNet
-from model.delay_phase_2_pred_net import TauPhase2PredictionNet
+from model.delay_phase_2_xyz_net import TauPhase2PredictionNet3D
 from data_loaders.my_dataloader import RadarMatDataset
 
 
@@ -148,7 +148,7 @@ def compute_tau_stats(dataset):
     """Matches train_delay_net_2d (std_floor applied)."""
     loader = DataLoader(dataset, batch_size=512, shuffle=False, num_workers=4)
     all_tau = []
-    for _, _, _, tau, _ in loader:
+    for _, _, _, tau, _,_ in loader:
         all_tau.append(tau.float())
     all_tau = torch.cat(all_tau, dim=0)   # [N, M]
     tau_mean = all_tau.mean(dim=0)
@@ -162,9 +162,9 @@ def compute_coord_stats(dataset):
     """Matches train_delay_2_pred (std_floor, same as compute_tau_stats)."""
     loader = DataLoader(dataset, batch_size=512, shuffle=False, num_workers=4)
     all_coord = []
-    for _, _, coord, _, _ in loader:
-        all_coord.append(coord.float()[..., :2])
-    all_coord = torch.cat(all_coord, dim=0)  # [N, 2]
+    for _, _, coord, _, _,_ in loader:
+        all_coord.append(coord.float()[..., :3])
+    all_coord = torch.cat(all_coord, dim=0)  # [N, 3]
     return (
         all_coord.mean(dim=0), all_coord.std(dim=0).clamp(min=1e-8),
     )
@@ -178,8 +178,8 @@ def main():
     print(f"Using {gpu_label}")
 
     # ── Dataset ──────────────────────────────────────────────
-    train_dataset = RadarMatDataset(root_dir="D:\\radar-dataset-noisy\\train")
-    test_dataset   = RadarMatDataset(root_dir="D:\\radar-dataset-noisy\\test")
+    train_dataset = RadarMatDataset(root_dir="D:\\radar-dataset-3D-noisy\\train")
+    test_dataset   = RadarMatDataset(root_dir="D:\\radar-dataset-3D-noisy\\test")
 
     print("Computing normalisation stats from train set...")
     tau_mean_1, tau_std_1 = compute_tau_stats(train_dataset)       # delay_net stats (std_floor)
@@ -197,14 +197,14 @@ def main():
     )
 
     # ── Load models ──────────────────────────────────────────
-    ckpt_tau   = torch.load("delay_net_noisy.pt",  map_location=device, weights_only=True)
-    ckpt_coord = torch.load("delay_phase_2_xy_noisy.pt",  map_location=device, weights_only=True)
+    ckpt_tau   = torch.load("delay_net_3d_noisy.pt",  map_location=device, weights_only=True)
+    ckpt_coord = torch.load("delay_phase_2_3D_noisy.pt",  map_location=device, weights_only=True)
 
     delay_net = DelayNet(M=M).to(device)
     delay_net.load_state_dict(ckpt_tau["model_state_dict"])
     delay_net.eval()
 
-    coord_net = TauPhase2PredictionNet(M=40, hidden_dim=512).to(device)
+    coord_net = TauPhase2PredictionNet3D(M=40, hidden_dim=512).to(device)
     coord_net.load_state_dict(ckpt_coord["model_state_dict"])
     coord_net.eval()
 
@@ -219,10 +219,12 @@ def main():
     #           →  coord_net  →  pred_coord_norm
     #           →  denorm to metres
     errors_m = []   # per-sample Euclidean error in metres
+    errors_snr_below_7_db = []
+    errors_snr_above_7_db = []
 
-    for signal, _, coord_gt, tau_gt, phi_gt in test_loader:
+    for signal, _, coord_gt, tau_gt, phi_gt, snr in test_loader:
         signal   = signal.to(device, non_blocking=True).float()
-        coord_gt = coord_gt.to(device, non_blocking=True).float()[..., :2]
+        coord_gt = coord_gt.to(device, non_blocking=True).float()[..., :3]
 
         # Stage 1 — signal → normalised tau
         pred_tau_norm = delay_net(signal)                               # [B, M]
@@ -249,8 +251,14 @@ def main():
 
         err = torch.linalg.vector_norm(pred_coord - coord_gt, dim=1)   # [B]
         errors_m.append(err.cpu())
+        indecies_snr_below_7_db = snr < 7.0
+        indecies_snr_above_7_db = snr >= 7.0
+        errors_snr_below_7_db.append(err[indecies_snr_below_7_db].cpu())
+        errors_snr_above_7_db.append(err[indecies_snr_above_7_db].cpu())
 
     errors_m = torch.cat(errors_m).numpy()
+    errors_snr_below_7_db = torch.cat(errors_snr_below_7_db).numpy()
+    errors_snr_above_7_db = torch.cat(errors_snr_above_7_db).numpy()
 
     # ── Metrics ──────────────────────────────────────────────
     print(f"\n── Chained evaluation on test set ({len(errors_m)} samples) ──")
@@ -260,6 +268,10 @@ def main():
     print(f"  90th pct      : {np.percentile(errors_m, 90):.2f} m")
     print(f"  95th pct      : {np.percentile(errors_m, 95):.2f} m")
     print(f"  Max error     : {errors_m.max():.2f} m")
+    print(f" RMSE           : {np.sqrt(np.mean(errors_m**2)):.2f} m")
+    print(f" RMSE (SNR < 7 dB)  : {np.sqrt(np.mean(errors_snr_below_7_db**2)):.2f} m")
+    print(f" RMSE (SNR >= 7 dB) : {np.sqrt(np.mean(errors_snr_above_7_db**2)):.2f} m")
+    
 
     # ── Plot ─────────────────────────────────────────────────
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
@@ -271,8 +283,9 @@ def main():
                     label=f"median {np.median(errors_m):.1f} m")
     axes[0].set_xlabel("Euclidean error (m)")
     axes[0].set_ylabel("Count")
-    axes[0].set_title("Position error distribution")
+    axes[0].set_title("localization error distribution")
     axes[0].legend()
+
 
     sorted_err = np.sort(errors_m)
     cdf = np.linspace(0, 1, len(sorted_err))
@@ -288,6 +301,32 @@ def main():
     plt.show()
     print(f"Saved {out_path}")
 
+
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    axes[0].hist(errors_snr_below_7_db, bins=60, edgecolor="black")
+    axes[0].axvline(errors_snr_below_7_db.mean(),       color="red",    linestyle="--",
+                    label=f"mean {errors_snr_below_7_db.mean():.1f} m")
+    axes[0].axvline(np.median(errors_snr_below_7_db),   color="orange", linestyle="--",
+                    label=f"median {np.median(errors_m):.1f} m")
+    axes[0].set_xlabel("Euclidean error (m)")
+    axes[0].set_ylabel("Count")
+    axes[0].set_title("localization error distribution (SNR < 7 dB)")
+    axes[0].legend()
+
+    axes[1].hist(errors_snr_above_7_db, bins=60, edgecolor="black")
+    axes[1].axvline(errors_snr_above_7_db.mean(),       color="red",    linestyle="--",
+                    label=f"mean {errors_snr_above_7_db.mean():.1f} m")
+    axes[1].axvline(np.median(errors_snr_above_7_db),   color="orange", linestyle="--",
+                    label=f"median {np.median(errors_snr_above_7_db):.1f} m")
+    axes[1].set_xlabel("Euclidean error (m)")
+    axes[1].set_ylabel("Count")
+    axes[1].set_title("localization error distribution (SNR >= 7 dB)")
+    axes[1].legend()
+    plt.tight_layout()
+
+    plt.show()
+    print(f"Saved {out_path}")
 
 if __name__ == "__main__":
     main()

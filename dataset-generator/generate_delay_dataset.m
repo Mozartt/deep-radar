@@ -27,16 +27,12 @@ addpath("../simulator/")
 
 numSamples = 10000;
 
-% Spatial region for target generation
-
-zRange = [300, 300];
-
 % Signal parameters
 alphaRange = [1, 1];
 snrRange   = [-5, 20]; %dB
 
 % Output folder
-datasetDir = "D:\radar-dataset-noisy\";
+datasetDir = "D:\radar-dataset-3D-noisy\";
 
 testDir  = fullfile(datasetDir, 'test');
 valDir   = fullfile(datasetDir, 'validation');
@@ -67,7 +63,8 @@ fprintf('Generating dataset...\n');
 radius = 150;
 theta = 2 * pi * rand(numSamples, 1);
 r = radius * sqrt(rand(numSamples, 1));
-
+zRange = [200 300];
+Z = zRange(1) + (zRange(2) - zRange(1)) * rand(numSamples, 1);
 
 for i = 1:numSamples
 
@@ -77,7 +74,7 @@ for i = 1:numSamples
 
     x = r(i) .* cos(theta(i));
     y = r(i) .* sin(theta(i));
-    z = rand_uniform(zRange);
+    z = Z(i);
     p_target = [x; y; z];
     
     %% ---------------------------------

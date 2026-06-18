@@ -38,11 +38,14 @@ class RadarMatDataset(Dataset):
 		coord = _to_coord_tensor(sample["target_xyz"])
 		tau = _to_tau_tensor(sample["tau"])
 		phi = _to_tau_tensor(sample["phi"])
+		snr = sample.get("SNR", sample.get("snr"))
+		if snr is None:
+			raise KeyError("Field 'SNR' missing in sample")
 		if heatmap.numel() > 0:
 			heatmap = heatmap - heatmap.min()
 			heatmap = heatmap / (heatmap.max() + 1e-8)
 
-		return signal, heatmap, coord, tau, phi
+		return signal, heatmap, coord, tau, phi, _to_scalar_tensor(snr)
         
 
 def _load_sample_dict(file_path: Path) -> Dict[str, Any]:
@@ -78,16 +81,19 @@ def _load_sample_with_scipy(file_path: Path) -> Dict[str, Any]:
 			"target_xyz": sample_obj.target_xyz,
 			"tau": sample_obj.tau,
 			"phi": sample_obj.phi,
+			"SNR": getattr(sample_obj, "SNR", None),
 		}
 
 	if isinstance(sample_obj, np.ndarray) and sample_obj.dtype.names:
 		elem = sample_obj.reshape(-1)[0]
+		has_snr = "SNR" in elem.dtype.names
 		return {
 			"y_ell": elem["y_ell"],
 			"heatmap": elem["heatmap"],
 			"target_xyz": elem["target_xyz"],
 			"tau": elem["tau"],
 			"phi": elem["phi"],
+			"SNR": elem["SNR"] if has_snr else None,
 		}
 	
 def _load_sample_with_h5py(file_path: Path) -> Dict[str, Any]:
@@ -107,6 +113,7 @@ def _load_sample_with_h5py(file_path: Path) -> Dict[str, Any]:
 			"target_xyz": _read_h5_field(f, sample_group, "target_xyz"),
 			"tau": _read_h5_field(f, sample_group, "tau"),
 			"phi": _read_h5_field(f, sample_group, "phi"),
+			"SNR": _read_h5_optional_field(f, sample_group, "SNR"),
 		}
 
 
@@ -141,6 +148,18 @@ def _read_h5_field(f: Any, sample_group: Any, field_name: str) -> np.ndarray:
 		return _to_numpy_array(data)
 
 	raise TypeError(f"Unsupported field type for '{field_name}'")
+
+
+def _read_h5_optional_field(f: Any, sample_group: Any, field_name: str) -> np.ndarray | None:
+	if isinstance(sample_group, h5py.Group):
+		if field_name not in sample_group:
+			return None
+	elif isinstance(sample_group, h5py.Dataset):
+		names = sample_group.dtype.names  # None for non-structured datasets
+		if names is None or field_name not in names:
+			return None
+
+	return _read_h5_field(f, sample_group, field_name)
 
 
 def _to_numpy_array(data: Any) -> np.ndarray:
@@ -196,3 +215,10 @@ def _to_coord_tensor(coord: Any) -> torch.Tensor:
 def _to_tau_tensor(tau: Any) -> torch.Tensor:
 	arr = np.asarray(tau, dtype=np.float32).reshape(-1)
 	return torch.from_numpy(arr)
+
+
+def _to_scalar_tensor(value: Any) -> torch.Tensor:
+	arr = np.asarray(value, dtype=np.float32).reshape(-1)
+	if arr.size == 0:
+		raise ValueError("SNR must contain at least one value")
+	return torch.tensor(arr[0], dtype=torch.float32)
