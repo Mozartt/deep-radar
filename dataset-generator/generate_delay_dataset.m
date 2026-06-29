@@ -32,7 +32,7 @@ alphaRange = [1, 1];
 snrRange   = [-5, 20]; %dB
 
 % Output folder
-datasetDir = "D:\radar-dataset-3D-noisy\";
+datasetDir = "D:\temp\";
 
 testDir  = fullfile(datasetDir, 'test');
 valDir   = fullfile(datasetDir, 'validation');

@@ -91,30 +91,13 @@ def refine_tau(pred_tau, signal):
     n0 = estimate_chirp_starts(complex_signal, L=128)  # [B, M]
     max_nz_idx = int(n0.max())  # scalar
     phase_only_nz = phase_only[:, :, max_nz_idx:]  # [B, M, N']
-    theta = torch.angle(phase_only_nz)              # [B, M, N']
-    theta_np = theta.detach().cpu().numpy()
-    theta_unwrapped_np = np.unwrap(theta_np, axis=-1)
-    theta_unwrapped = torch.from_numpy(
-        theta_np
-    ).float()  # [B, M, N']
+    #phi_hat = torch.angle(phase_only_nz).mean(dim=-1)             # [B, M, N']
+    #theta_np = theta.detach().cpu().numpy()
+    #theta_unwrapped_np = np.unwrap(theta_np, axis=-1)
+    #theta_unwrapped = torch.from_numpy(
+    #    theta_np
+    #).float()  # [B, M, N']
 
-    # w = torch.ones_like(theta_unwrapped)
-    # eps = 1e-12
-    # N_actual = theta_unwrapped.shape[-1]
-    # w_sum = w.sum(dim=-1, keepdim=True) + eps
-    # n = torch.arange(N_actual, device=theta_unwrapped.device)
-    # n_view = n.view(1, 1, N_actual)
-    # n_bar = (n_view).sum(dim=-1, keepdim=True) / w_sum
-    # theta_bar = (theta_unwrapped).sum(dim=-1, keepdim=True) / w_sum
-    # n_centered = n_view - n_bar
-    # theta_centered = theta_unwrapped - theta_bar
-    # numerator = (n_centered * theta_centered).sum(dim=-1)
-    # denominator = (n_centered ** 2).sum(dim=-1) + eps
-    # omega_hat = numerator / denominator  # [B, M], rad/sample
-
-    #phase_only_nz = phase_only_nz.detach().cpu().numpy()  # [B, M, N']
-    #prod = phase_only_nz[:, :, 1:]* np.conj(phase_only_nz[:, :, :-1])
-    #omega_hat = np.angle(np.sum(prod))
     # try multi-lag 
     phase_only_nz = phase_only_nz.detach().cpu().numpy()
     eps = 1e-12
@@ -142,7 +125,7 @@ def refine_tau(pred_tau, signal):
     phase_only_nz = phase_only[:, :, max_nz_idx:]                 # [B, M, N']
     phi_hat = torch.angle(phase_only_nz).mean(dim=-1)             # [B, M]
     
-    return refined_tau, phi_hat
+    return pred_tau, phi_hat
 
 def compute_tau_stats(dataset):
     """Matches train_delay_net_2d (std_floor applied)."""
@@ -197,10 +180,20 @@ def main():
     )
 
     # ── Load models ──────────────────────────────────────────
-    ckpt_tau   = torch.load("delay_net_3d_noisy.pt",  map_location=device, weights_only=True)
+    ckpt_tau   = torch.load("best_radar_model.pt",  map_location=device, weights_only=True)
     ckpt_coord = torch.load("delay_phase_2_3D_noisy.pt",  map_location=device, weights_only=True)
 
-    delay_net = DelayNet(M=M).to(device)
+    delay_net = DelayNet(M=40,
+    Fs=5e7,
+    a=1e13,
+    nfft=1024,
+    freq_side="negative",
+    base_ch=64,
+    beat_sign=-1.0,
+    output_mode="seconds",
+    tau_mean=tau_mean_1,
+    tau_std=tau_std_1).to(device)
+
     delay_net.load_state_dict(ckpt_tau["model_state_dict"])
     delay_net.eval()
 
@@ -227,11 +220,11 @@ def main():
         coord_gt = coord_gt.to(device, non_blocking=True).float()[..., :3]
 
         # Stage 1 — signal → normalised tau
-        pred_tau_norm = delay_net(signal)                               # [B, M]
+        pred_tau = delay_net(signal)                               # [B, M]
 
         # Bridge — denorm from delay_net space → renorm for coord_net space
-        pred_tau_phys = pred_tau_norm * tau_std_1 + tau_mean_1          # [B, M] (physical)
-        refined_tau, phi = refine_tau(pred_tau_phys, signal)  # refine tau and estimate phi_hat
+        #pred_tau_phys = pred_tau_norm * tau_std_1 + tau_mean_1          # [B, M] (physical)
+        refined_tau, phi = refine_tau(pred_tau, signal)  # refine tau and estimate phi_hat
 
         refined_tau_norm = (refined_tau - tau_mean_1) / tau_std_1  # renorm for coord_net
         # Stage 2 — normalised tau → normalised coord

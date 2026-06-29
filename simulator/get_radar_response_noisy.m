@@ -25,7 +25,7 @@ y_ell = alfa * y_ell;
 signal_power = mean(abs(y_ell(:)).^2);
 
 % Noise power
-noise_power = signal_power / (10^(SNR_dB/10));
+noise_power = N * signal_power / (10^(SNR_dB/10));
 
 % Complex Gaussian noise
 noise = sqrt(noise_power/2) * ...
