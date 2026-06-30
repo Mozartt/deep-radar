@@ -14,7 +14,6 @@ if str(PROJECT_ROOT) not in sys.path:
 from model.delay_2_xyz_net import Delay2XYZNet
 from model.delay_net import DelayNet
 from data_loaders.my_dataloader import RadarMatDataset
-import time
 
 Fs = 5e7
 a = 1e13
@@ -222,39 +221,36 @@ def main():
     coord_net.load_state_dict(ckpt_coord["model_state_dict"])
     coord_net.eval()
 
-    signal, _, coord_gt, tau_gt, phi_gt, snr = test_dataset[0]
-    signal   = signal.to(device, non_blocking=True).float()
-    coord_gt = coord_gt.to(device, non_blocking=True).float()[..., :3]
+    for signal, _, coord_gt, tau_gt, phi_gt, snr in test_loader:
+        signal   = signal.to(device, non_blocking=True).float()
+        coord_gt = coord_gt.to(device, non_blocking=True).float()[..., :3]
 
-    # measure time 
-    start_time = time.time()
+        # Stage 1 — signal → normalised tau
+        pred_tau = delay_net(signal)                               # [B, M]
+        pred_tau_norm = (pred_tau - tau_mean_1) / tau_std_1
 
-    # Stage 1 — signal → normalised tau
-    pred_tau = delay_net(signal.unsqueeze(0))                               # [B, M]
-    pred_tau_norm = (pred_tau - tau_mean_1) / tau_std_1
+        #stage 2 - initial tau -> normalised coord
+        coord_pred_norm = coord_net(pred_tau_norm)                            # [B, 3]
+        pred_coord = coord_pred_norm * coord_std + coord_mean
 
-    #stage 2 - initial tau -> normalised coord
-    coord_pred_norm = coord_net(pred_tau_norm)                            # [B, 3]
-    pred_coord = coord_pred_norm * coord_std + coord_mean
+        for b in range(signal.shape[0]):
 
-    p_refined = matched_filter_refinment(
-        y_ell=signal.cpu().numpy(),
-        p_hat=pred_coord.cpu().numpy(),
-        q=Q.T,
-        p_tx=P_TX,
-        fc=Fs / 4,
-        a=a,
-        Ts=1 / Fs,
-        Tc=Tc,
-        cube_side=2.0,
-        resolution=0.5,
-        c=3e8,
-        normalize=True,
-    )[1]
+            p_refined = matched_filter_refinment(
+                y_ell=signal[b].cpu().numpy(),
+                p_hat=pred_coord[b].cpu().numpy(),
+                q=Q.T,
+                p_tx=P_TX,
+                fc=Fs / 4,
+                a=a,
+                Ts=1 / Fs,
+                Tc=Tc,
+                cube_side=2.0,
+                resolution=0.5,
+                c=3e8,
+                normalize=True,
+            )[1]
 
-    end_time = time.time()
-    print(f"Inference time: {end_time - start_time:.4f} seconds")
-    error = np.linalg.norm(p_refined - coord_gt.cpu().numpy())
+            error = np.linalg.norm(p_refined - coord_gt[b].cpu().numpy())
 
 
 if __name__ == "__main__":

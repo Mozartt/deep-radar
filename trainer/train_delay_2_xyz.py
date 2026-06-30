@@ -10,21 +10,20 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from model.delay_2_prediction_net import Delay2PredictionNet
-from model.delay_net import DelayNet
+from model.delay_2_xyz_net import Delay2PredictionNet
 from data_loaders.my_dataloader import RadarMatDataset
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 
 def compute_dataset_stats(dataset):
-    """Compute per-feature mean and std of tau and coord[:2] over the full dataset."""
+    """Compute per-feature mean and std of tau and coord[:3] over the full dataset."""
     loader = DataLoader(dataset, batch_size=512, shuffle=False, num_workers=4)
     all_tau, all_coord = [], []
-    for signal, heatmap, coord, tau, phi in loader:
+    for signal, heatmap, coord, tau, phi, snr in loader:
         all_tau.append(tau.float())
-        all_coord.append(coord.float()[..., :2])
+        all_coord.append(coord.float()[..., :3])
     all_tau = torch.cat(all_tau, dim=0)      # [N, M]
-    all_coord = torch.cat(all_coord, dim=0)  # [N, 2]
+    all_coord = torch.cat(all_coord, dim=0)  # [N, 3]
     tau_std = all_tau.std(dim=0)
     std_floor = torch.clamp(tau_std.mean() * 0.1, min=1e-6)
     tau_std = tau_std.clamp(min=std_floor)
@@ -41,11 +40,11 @@ def train_one_epoch(model, loader, optimizer, device, scaler, use_amp,
 
     total_loss = 0.0
 
-    for signal, heatmap, coord, tau, phi in loader:
+    for signal, heatmap, coord, tau, phi, snr in loader:
 
         tau = tau.to(device, non_blocking=True).float()
 
-        coord = coord.to(device, non_blocking=True).float()[..., :2]
+        coord = coord.to(device, non_blocking=True).float()[..., :3]
 
         optimizer.zero_grad(set_to_none=True)
 
@@ -75,9 +74,9 @@ def validate(model, loader, device, use_amp,
 
     total_loss = 0.0
 
-    for signal, heatmap, coord, tau, phi in loader:
+    for signal, heatmap, coord, tau, phi, snr in loader:
 
-        coord = coord.to(device, non_blocking=True).float()[..., :2]
+        coord = coord.to(device, non_blocking=True).float()[..., :3]
         tau = tau.to(device, non_blocking=True).float()
 
         with torch.amp.autocast('cuda', enabled=use_amp):
@@ -117,17 +116,17 @@ def main():
     epochs = 50
 
     lr = 1e-3
-    M= 40
+    M = 40
     # -------------------------
     # Dataset
     # -------------------------
 
     train_dataset = RadarMatDataset(
-        root_dir="D:\\radar-dataset-noisy\\train",
+        root_dir="D:\\radar-dataset-3D-noisy\\train",
     )
 
     val_dataset = RadarMatDataset(
-        root_dir="D:\\radar-dataset-noisy\\validation",
+        root_dir="D:\\radar-dataset-3D-noisy\\validation",
     )
 
     print("Computing normalisation statistics from train set...")

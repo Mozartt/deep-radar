@@ -13,7 +13,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from model.delay_net import DelayNet
-from model.delay_2_prediction_net import Delay2PredictionNet
+from model.delay_2_xyz_net import Delay2PredictionNet
 from data_loaders.my_dataloader import RadarMatDataset
 
 
