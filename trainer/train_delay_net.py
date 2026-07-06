@@ -20,16 +20,53 @@ gc.collect()
 torch.cuda.empty_cache()
 
 
+
+def make_soft_bin_targets_from_freq(beat_freq_gt, freq_grid, sigma_bins=1.0):
+    """
+    beat_freq_gt: [B, M]
+        True beat frequency per receiver.
+
+    freq_grid: [K] or [1, 1, K]
+        Model frequency grid.
+
+    sigma_bins:
+        Width of the soft label in units of FFT bins.
+
+    returns:
+        soft_targets: [B, M, K]
+    """
+
+    if freq_grid.dim() == 1:
+        freq_grid = freq_grid.view(1, 1, -1)
+
+    freq_grid = freq_grid.to(device=beat_freq_gt.device, dtype=beat_freq_gt.dtype)
+
+    # Estimate bin spacing
+    df = torch.mean(torch.abs(freq_grid[..., 1:] - freq_grid[..., :-1]))
+
+    sigma_freq = sigma_bins * df
+
+    # Distance between every GT beat frequency and every bin
+    dist = freq_grid - beat_freq_gt.unsqueeze(-1)  # [B, M, K]
+
+    soft_targets = torch.exp(-0.5 * (dist / sigma_freq) ** 2)
+
+    # Normalize to probability distribution
+    soft_targets = soft_targets / (soft_targets.sum(dim=-1, keepdim=True) + 1e-12)
+
+    return soft_targets
+
 def delay_loss(
-    pred_tau,
+    pred_tau_norm,
     aux,
     tau_gt,
     model,
-    lambda_bin=0.03
+    lambda_bin=1
 ):
-    pred_tau_norm = (pred_tau - model.tau_mean) / model.tau_std
-    tau_gt_norm = (tau_gt - model.tau_mean) / model.tau_std
-    tau_loss = F.smooth_l1_loss(pred_tau_norm, tau_gt_norm)
+    #pred_tau_norm = (pred_tau - model.tau_mean) / model.tau_std
+    #tau_gt_norm = (tau_gt - model.tau_mean) / model.tau_std
+    pred_tau_phys = pred_tau_norm * model.tau_std + model.tau_mean
+    tau_loss = F.smooth_l1_loss(pred_tau_phys*1e6, tau_gt*1e6)
 
     beat_freq_gt = -1 * model.a * tau_gt
     freq_grid = model.freq_grid.view(1, 1, model.K)
@@ -41,14 +78,22 @@ def delay_loss(
 
     logits = aux["logits"]
 
-    bin_loss = F.cross_entropy(
-        logits.reshape(-1, model.K),
-        target_bin.reshape(-1),
+    soft_targets = make_soft_bin_targets_from_freq(
+        beat_freq_gt=beat_freq_gt,
+        freq_grid=model.freq_grid,
+        sigma_bins=0.7,
     )
+    
+    log_probs = F.log_softmax(logits, dim=-1)
+    bin_loss = -(soft_targets * log_probs).sum(dim=-1).mean()
+    # bin_loss = F.cross_entropy(
+    #     logits.reshape(-1, model.K),
+    #     target_bin.reshape(-1),
+    # )
 
     loss = tau_loss + lambda_bin * bin_loss
 
-    return loss
+    return loss, tau_loss, bin_loss
 
 def compute_tau_stats(dataset):
     """Compute per-feature mean and std of tau over the full training set."""
@@ -66,10 +111,12 @@ def compute_tau_stats(dataset):
 
 
 
-def train_one_epoch(model, loader, optimizer, device, scaler, use_amp, tau_mean, tau_std):
+def train_one_epoch(model, loader, optimizer, device, scaler, use_amp, tau_mean, tau_std, epoch):
     model.train()
 
     total_loss = 0.0
+    total_tau_loss = 0.0
+    total_bin_loss = 0.0
 
     for signal, heatmap, coord, tau, phi, snr in loader:
 
@@ -78,10 +125,20 @@ def train_one_epoch(model, loader, optimizer, device, scaler, use_amp, tau_mean,
 
         optimizer.zero_grad(set_to_none=True)
 
+        snr = torch.empty(signal.size(0)).uniform_(-5, 20)
+        # if epoch <= 5:
+        #     snr = torch.empty(signal.size(0)).uniform_(10, 20.0)
+        # elif epoch <= 15:
+        #     snr = torch.empty(signal.size(0)).uniform_(7, 10)
+        # else:
+        #     snr = torch.empty(signal.size(0)).uniform_(-5, 7)
+
+        signal = _add_noise(signal, snr)
+
         with torch.amp.autocast('cuda', enabled=use_amp):
             pred_tau, aux = model(signal, return_aux=True)        # model predicts in normalised space
             #pred_tau = pred_tau_norm * model.tau_std + model.tau_mean        # denorm to physical tau
-            loss = delay_loss(pred_tau, aux=aux, tau_gt=tau, model=model)
+            loss, tau_loss, bin_loss = delay_loss(pred_tau, aux=aux, tau_gt=tau, model=model)
             #loss = torch.linalg.vector_norm((pred_tau - tau) * 1e6, dim=1).mean()  # loss in µs
 
         scaler.scale(loss).backward()
@@ -91,7 +148,12 @@ def train_one_epoch(model, loader, optimizer, device, scaler, use_amp, tau_mean,
         scaler.update()
 
         total_loss += loss.item() * signal.size(0)
+        total_tau_loss += tau_loss.item() * signal.size(0)
+        total_bin_loss += bin_loss.item() * signal.size(0)
 
+    print(f"train tau loss: {total_tau_loss / len(loader.dataset):.6f} |"
+          f"train bin loss: {total_bin_loss / len(loader.dataset):.6f}")
+      
     return total_loss / len(loader.dataset)
 
 # ============================================================
@@ -103,6 +165,8 @@ def validate(model, loader, device, use_amp, tau_mean, tau_std):
     model.eval()
 
     total_loss = 0.0
+    total_tau_loss = 0.0
+    total_bin_loss = 0.0
 
     for signal, heatmap, coord, tau, phi, snr in loader:
         signal = signal.to(device, non_blocking=True).float()
@@ -110,11 +174,15 @@ def validate(model, loader, device, use_amp, tau_mean, tau_std):
 
         with torch.amp.autocast('cuda', enabled=use_amp):
             pred_tau, aux = model(signal, return_aux=True)        # model predicts in normalised space
-            #pred_tau = pred_tau_norm * model.tau_std + model.tau_mean        # denorm to physical tau
-            loss = delay_loss(pred_tau, aux=aux, tau_gt=tau, model=model)
+            loss, tau_loss, bin_loss = delay_loss(pred_tau, aux=aux, tau_gt=tau, model=model)
 
         total_loss += loss.item() * signal.size(0)
+        total_tau_loss += tau_loss.item() * signal.size(0)
+        total_bin_loss += bin_loss.item() * signal.size(0)
 
+    print(f"validation tau loss: {total_tau_loss / len(loader.dataset):.6f} |"
+          f"validation bin loss: {total_bin_loss / len(loader.dataset):.6f}")
+      
     return total_loss / len(loader.dataset)
 
 
@@ -139,8 +207,8 @@ def main():
     # Config
     # -------------------------
 
-    batch_size = 32
-    epochs = 10
+    batch_size = 16
+    epochs = 40
 
     lr = 1e-3
 
@@ -149,11 +217,11 @@ def main():
     # -------------------------
 
     train_dataset = RadarMatDataset(
-        root_dir="D:\\radar-dataset-3d-noisy\\train",
+        root_dir="D:\\radar-dataset-clean\\train",
     )
 
     val_dataset = RadarMatDataset(
-        root_dir="D:\\radar-dataset-3d-noisy\\validation",
+        root_dir="D:\\radar-dataset-clean\\validation",
     )
 
     print("Computing tau normalization statistics from train set...")
@@ -196,7 +264,7 @@ def main():
     freq_side="negative",
     base_ch=64,
     beat_sign=-1.0,
-    output_mode="seconds",
+    output_mode="normalized",
     tau_mean=tau_mean,
     tau_std=tau_std).to(device)
 
@@ -235,6 +303,7 @@ def main():
             use_amp,
             tau_mean,
             tau_std,
+            epoch
         )
 
         val_loss = validate(
@@ -261,7 +330,7 @@ def main():
         # -------------------------
 
         if val_loss < best_val_loss:
-
+            count = 0
             best_val_loss = val_loss
 
             torch.save(
@@ -275,7 +344,36 @@ def main():
             )
 
             print("Saved best model")
+        
+        count += 1
+        # early stoping is validation hasnt improved for 5 epochs
+        if count > 7:
+            print("Early stopping")
+            break
 
+
+def _add_noise(signal: torch.Tensor, snr_db: torch.Tensor) -> torch.Tensor:
+	"""Add complex Gaussian noise to a [2, M, N] or [B, 2, M, N] signal tensor.
+
+	Matches the MATLAB noise model in get_radar_response_noisy.m:
+		signal_power = 1
+		noise_power  = N * signal_power / 10^(SNR_dB/10)
+		noise        = sqrt(noise_power/2) * (randn + 1j*randn)
+
+	Args:
+		signal : [2, M, N] or [B, 2, M, N]
+		snr_db : scalar tensor  OR  [B] tensor (one SNR per sample in the batch)
+	"""
+	N = signal.shape[-1]
+	snr_linear = 10.0 ** (snr_db / 10.0)           # scalar or [B]
+	noise_power = N / snr_linear                    # scalar or [B]
+	std = (noise_power / 2.0) ** 0.5               # scalar or [B]
+
+	if std.ndim > 0:                                # batched: reshape [B] -> [B, 1, 1, 1]
+		std = std.view(-1, 1, 1, 1)
+
+	noise = torch.randn_like(signal) * std.to(signal.device)
+	return signal + noise
 
 if __name__ == "__main__":
     main()

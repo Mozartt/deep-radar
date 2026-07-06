@@ -161,8 +161,8 @@ def main():
     print(f"Using {gpu_label}")
 
     # ── Dataset ──────────────────────────────────────────────
-    train_dataset = RadarMatDataset(root_dir="D:\\radar-dataset-3D-noisy\\train")
-    test_dataset   = RadarMatDataset(root_dir="D:\\radar-dataset-3D-noisy\\test")
+    train_dataset = RadarMatDataset(root_dir="D:\\radar-dataset-clean\\train")
+    test_dataset   = RadarMatDataset(root_dir="D:\\radar-dataset-clean\\test")
 
     print("Computing normalisation stats from train set...")
     tau_mean_1, tau_std_1 = compute_tau_stats(train_dataset)       # delay_net stats (std_floor)
@@ -180,7 +180,7 @@ def main():
     )
 
     # ── Load models ──────────────────────────────────────────
-    ckpt_tau   = torch.load("best_radar_model.pt",  map_location=device, weights_only=True)
+    ckpt_tau   = torch.load("delay_net_3D_high_noise.pt",  map_location=device, weights_only=True)
     ckpt_coord = torch.load("delay_phase_2_3D_noisy.pt",  map_location=device, weights_only=True)
 
     delay_net = DelayNet(M=40,
@@ -190,7 +190,7 @@ def main():
     freq_side="negative",
     base_ch=64,
     beat_sign=-1.0,
-    output_mode="seconds",
+    output_mode="normalized",
     tau_mean=tau_mean_1,
     tau_std=tau_std_1).to(device)
 
@@ -220,11 +220,11 @@ def main():
         coord_gt = coord_gt.to(device, non_blocking=True).float()[..., :3]
 
         # Stage 1 — signal → normalised tau
-        pred_tau = delay_net(signal)                               # [B, M]
+        pred_tau_norm = delay_net(signal)                               # [B, M]
 
         # Bridge — denorm from delay_net space → renorm for coord_net space
-        #pred_tau_phys = pred_tau_norm * tau_std_1 + tau_mean_1          # [B, M] (physical)
-        refined_tau, phi = refine_tau(pred_tau, signal)  # refine tau and estimate phi_hat
+        pred_tau_phys = pred_tau_norm * tau_std_1 + tau_mean_1          # [B, M] (physical)
+        refined_tau, phi = refine_tau(pred_tau_phys, signal)  # refine tau and estimate phi_hat
 
         refined_tau_norm = (refined_tau - tau_mean_1) / tau_std_1  # renorm for coord_net
         # Stage 2 — normalised tau → normalised coord
@@ -301,7 +301,7 @@ def main():
     axes[0].axvline(errors_snr_below_7_db.mean(),       color="red",    linestyle="--",
                     label=f"mean {errors_snr_below_7_db.mean():.1f} m")
     axes[0].axvline(np.median(errors_snr_below_7_db),   color="orange", linestyle="--",
-                    label=f"median {np.median(errors_m):.1f} m")
+                    label=f"median {np.median(errors_snr_below_7_db):.1f} m")
     axes[0].set_xlabel("Euclidean error (m)")
     axes[0].set_ylabel("Count")
     axes[0].set_title("localization error distribution (SNR < 7 dB)")

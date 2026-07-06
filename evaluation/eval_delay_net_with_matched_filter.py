@@ -174,6 +174,7 @@ def compute_coord_stats(dataset):
     )
 
 
+
 @torch.no_grad()
 def main():
     device   = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -182,8 +183,8 @@ def main():
     print(f"Using {gpu_label}")
 
     # ── Dataset ──────────────────────────────────────────────
-    train_dataset = RadarMatDataset(root_dir="D:\\radar-dataset-3D-noisy\\train")
-    test_dataset   = RadarMatDataset(root_dir="D:\\radar-dataset-3D-noisy\\test")
+    train_dataset = RadarMatDataset(root_dir="D:\\radar-dataset-clean\\train")
+    test_dataset   = RadarMatDataset(root_dir="D:\\radar-dataset-clean\\test")
 
     print("Computing normalisation stats from train set...")
     tau_mean_1, tau_std_1 = compute_tau_stats(train_dataset)       # delay_net stats (std_floor)
@@ -210,7 +211,7 @@ def main():
     freq_side="negative",
     base_ch=64,
     beat_sign=-1.0,
-    output_mode="seconds",
+    output_mode="normalized",
     tau_mean=tau_mean_1,
     tau_std=tau_std_1).to(device)
 
@@ -221,36 +222,129 @@ def main():
     coord_net.load_state_dict(ckpt_coord["model_state_dict"])
     coord_net.eval()
 
+    errors_3d = []
+    snr_all   = []
+    error_rmse = 0.0
+
     for signal, _, coord_gt, tau_gt, phi_gt, snr in test_loader:
         signal   = signal.to(device, non_blocking=True).float()
         coord_gt = coord_gt.to(device, non_blocking=True).float()[..., :3]
 
         # Stage 1 — signal → normalised tau
-        pred_tau = delay_net(signal)                               # [B, M]
-        pred_tau_norm = (pred_tau - tau_mean_1) / tau_std_1
+        pred_tau = delay_net(signal)  
+        pred_tau_phy = pred_tau * tau_std_1 + tau_mean_1                             # [B, M]
 
         #stage 2 - initial tau -> normalised coord
-        coord_pred_norm = coord_net(pred_tau_norm)                            # [B, 3]
+        coord_pred_norm = coord_net(pred_tau)                            # [B, 3]
         pred_coord = coord_pred_norm * coord_std + coord_mean
 
-        for b in range(signal.shape[0]):
+        # for b in range(signal.shape[0]):
 
-            p_refined = matched_filter_refinment(
-                y_ell=signal[b].cpu().numpy(),
-                p_hat=pred_coord[b].cpu().numpy(),
-                q=Q.T,
-                p_tx=P_TX,
-                fc=Fs / 4,
-                a=a,
-                Ts=1 / Fs,
-                Tc=Tc,
-                cube_side=2.0,
-                resolution=0.5,
-                c=3e8,
-                normalize=True,
-            )[1]
+        #     p_refined = matched_filter_refinment(
+        #         y_ell=signal[b].cpu().numpy(),
+        #         p_hat=pred_coord[b].cpu().numpy(),
+        #         q=Q.T,
+        #         p_tx=P_TX,
+        #         fc=Fs / 4,
+        #         a=a,
+        #         Ts=1 / Fs,
+        #         Tc=Tc,
+        #         cube_side=2.0,
+        #         resolution=0.5,
+        #         c=3e8,
+        #         normalize=True,
+        #     )[1]
 
-            error = np.linalg.norm(p_refined - coord_gt[b].cpu().numpy())
+        error = torch.linalg.vector_norm(pred_coord - coord_gt, dim=1)
+        errors_3d.extend(error.cpu().numpy())
+        snr_all.extend(snr.cpu().numpy())
+        error_rmse += torch.mean(error ** 2).item()
+
+    errors_3d = np.array(errors_3d)
+    snr_all   = np.array(snr_all)
+    error_rmse = np.sqrt(error_rmse / len(errors_3d))
+
+    high_snr_mask = snr_all > 5.0
+    err_high = errors_3d[high_snr_mask]
+    err_low  = errors_3d[~high_snr_mask]
+
+    print(f"\n── 3D position error ({len(errors_3d)} samples) ──")
+    print(f"  Mean   : {errors_3d.mean():.3f} m")
+    print(f"  Median : {np.median(errors_3d):.3f} m")
+    print(f"  90th   : {np.percentile(errors_3d, 90):.3f} m")
+    print(f"  Max    : {errors_3d.max():.3f} m")
+    print(f"  RMSE   : {error_rmse:.3f} m")
+
+    print(f"\n── SNR > 5 dB ({len(err_high)} samples) ──")
+    if len(err_high):
+        print(f"  Mean   : {err_high.mean():.3f} m")
+        print(f"  Median : {np.median(err_high):.3f} m")
+        print(f"  90th   : {np.percentile(err_high, 90):.3f} m")
+
+    print(f"\n── SNR ≤ 5 dB ({len(err_low)} samples) ──")
+    if len(err_low):
+        print(f"  Mean   : {err_low.mean():.3f} m")
+        print(f"  Median : {np.median(err_low):.3f} m")
+        print(f"  90th   : {np.percentile(err_low, 90):.3f} m")
+
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    fig.suptitle(f"3D position error — all samples ({len(errors_3d)})")
+
+    # Histogram
+    axes[0].hist(errors_3d, bins=80, edgecolor="none", alpha=0.85, color="steelblue")
+    axes[0].axvline(errors_3d.mean(),              color="red",    linestyle="--",
+                    label=f"mean {errors_3d.mean():.2f} m")
+    axes[0].axvline(np.median(errors_3d),          color="orange", linestyle="--",
+                    label=f"median {np.median(errors_3d):.2f} m")
+    # axes[0].axvline(np.percentile(errors_3d, 90),  color="purple", linestyle=":",
+    #                 label=f"90th pct {np.percentile(errors_3d, 90):.2f} m")
+    axes[0].set_xlabel("3D error (m)")
+    axes[0].set_ylabel("Count")
+    axes[0].set_title("Euclidean error histogram")
+    axes[0].legend()
+
+    # CDF
+    sorted_err = np.sort(errors_3d)
+    axes[1].plot(sorted_err, np.linspace(0, 1, len(sorted_err)), color="steelblue")
+    axes[1].axhline(0.5,  color="orange", linestyle="--", label=f"50th: {np.median(errors_3d):.2f} m")
+    axes[1].axhline(0.9,  color="purple", linestyle=":",  label=f"90th: {np.percentile(errors_3d, 90):.2f} m")
+    axes[1].set_xlabel("3D error (m)")
+    axes[1].set_ylabel("CDF")
+    axes[1].set_title("Cumulative distribution (all)")
+    axes[1].grid(True, alpha=0.4)
+    axes[1].legend()
+
+    plt.tight_layout()
+
+    # ── SNR split figure ──────────────────────────────────────
+    fig2, axes2 = plt.subplots(1, 2, figsize=(13, 5))
+    fig2.suptitle("3D position error split by SNR (threshold = 5 dB)")
+
+    def _plot_group(ax, data, label, color):
+        if len(data) == 0:
+            ax.text(0.5, 0.5, "no samples", ha="center", va="center", transform=ax.transAxes)
+            return
+        ax.hist(data, bins=60, edgecolor="none", alpha=0.75, color=color, label=label)
+        ax.axvline(data.mean(),              color="red",    linestyle="--",
+                   label=f"mean {data.mean():.2f} m")
+        ax.axvline(np.median(data),          color="black",  linestyle="--",
+                   label=f"median {np.median(data):.2f} m")
+        ax.axvline(np.percentile(data, 90),  color="purple", linestyle=":",
+                   label=f"90th {np.percentile(data, 90):.2f} m")
+        ax.set_xlabel("3D error (m)")
+        ax.set_ylabel("Count")
+        ax.legend(fontsize=8)
+
+    _plot_group(axes2[0], err_high, f"SNR > 5 dB  (n={len(err_high)})",  color="steelblue")
+    axes2[0].set_title(f"SNR > 5 dB  (n={len(err_high)})")
+
+    _plot_group(axes2[1], err_low,  f"SNR ≤ 5 dB  (n={len(err_low)})",   color="darkorange")
+    axes2[1].set_title(f"SNR ≤ 5 dB  (n={len(err_low)})")
+
+    plt.tight_layout()
+    plt.show()
 
 
 if __name__ == "__main__":

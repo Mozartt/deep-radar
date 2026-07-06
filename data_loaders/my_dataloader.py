@@ -19,7 +19,7 @@ except ImportError:  # pragma: no cover
 class RadarMatDataset(Dataset):
 	"""PyTorch dataset for MATLAB samples saved as sample_XXXXXX.mat files."""
 
-	def __init__(self, root_dir: str, pattern: str = "sample_*.mat"):
+	def __init__(self, root_dir: str, pattern: str = "sample_*.mat", add_noise: bool = False):
 		self.root_dir = Path(root_dir)
 		if not self.root_dir.exists():
 			raise FileNotFoundError(f"Dataset folder does not exist: {self.root_dir}")
@@ -27,6 +27,8 @@ class RadarMatDataset(Dataset):
 		self.file_paths: List[Path] = sorted(self.root_dir.glob(pattern))
 		if not self.file_paths:
 			raise ValueError(f"No .mat files found in {self.root_dir} with pattern '{pattern}'")
+
+		self.add_noise = add_noise
 
 	def __len__(self) -> int:
 		return len(self.file_paths)
@@ -45,8 +47,32 @@ class RadarMatDataset(Dataset):
 			heatmap = heatmap - heatmap.min()
 			heatmap = heatmap / (heatmap.max() + 1e-8)
 
-		return signal, heatmap, coord, tau, phi, _to_scalar_tensor(snr)
+		snr_tensor = _to_scalar_tensor(snr)
+
+		if self.add_noise:
+			snr_tensor = torch.empty(1).uniform_(-5.0, 20.0).squeeze()
+			signal = _add_noise(signal, snr_tensor)
+
+		return signal, heatmap, coord, tau, phi, snr_tensor
         
+
+def _add_noise(signal: torch.Tensor, snr_db: torch.Tensor) -> torch.Tensor:
+	"""Add complex Gaussian noise to a [2, M, N] real/imag signal tensor.
+
+	Matches the MATLAB noise model in get_radar_response_noisy.m:
+		signal_power = 1
+		noise_power  = N * signal_power / 10^(SNR_dB/10)
+		noise        = sqrt(noise_power/2) * (randn + 1j*randn)
+
+	The two channels of the tensor represent real (0) and imag (1) parts,
+	so independent noise is added to each channel with std = sqrt(noise_power/2).
+	"""
+	N = signal.shape[-1]  # number of time samples
+	noise_power = N / (10.0 ** (snr_db.item() / 10.0))  # signal_power = 1
+	std = (noise_power / 2.0) ** 0.5
+	noise = torch.randn_like(signal) * std
+	return signal + noise
+
 
 def _load_sample_dict(file_path: Path) -> Dict[str, Any]:
 	errors = []

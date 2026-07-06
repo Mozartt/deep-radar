@@ -45,7 +45,7 @@ def _tau_model(P: np.ndarray) -> np.ndarray:
 def multilaterate(tau_meas: np.ndarray, x0: np.ndarray | None = None) -> np.ndarray:
     """Nonlinear least-squares multilateration.  Returns [x, y, z] in metres."""
     if x0 is None:
-        x0 = np.array([500.0, 500.0, 500.0])
+        x0 = np.array([200.0, 200.0, 200.0])
 
     def residuals(P):
         return _tau_model(P) - tau_meas
@@ -83,8 +83,8 @@ def main():
     print(f"Using {'GPU: ' + torch.cuda.get_device_name(0) if use_cuda else 'CPU'}")
 
     # ── Dataset ──────────────────────────────────────────────
-    train_dataset = RadarMatDataset(root_dir="D:\\radar-dataset-3D-noisy\\train")
-    test_dataset   = RadarMatDataset(root_dir="D:\\radar-dataset-3D-noisy\\test")
+    train_dataset = RadarMatDataset(root_dir="D:\\radar-dataset-clean\\train")
+    test_dataset   = RadarMatDataset(root_dir="D:\\radar-dataset-clean\\test")
 
     print("Computing tau normalisation stats from train set...")
     tau_mean, tau_std = compute_tau_stats(train_dataset)
@@ -99,7 +99,7 @@ def main():
     )
 
     # ── Load model ───────────────────────────────────────────
-    ckpt  = torch.load("best_radar_model.pt",
+    ckpt  = torch.load("delay_net_3D_high_noise.pt",
                        map_location=device, weights_only=True)
     model = DelayNet(M=40,
     Fs=5e7,
@@ -108,7 +108,7 @@ def main():
     freq_side="negative",
     base_ch=64,
     beat_sign=-1.0,
-    output_mode="seconds",
+    output_mode="normalized",
     tau_mean=tau_mean,
     tau_std=tau_std).to(device)
     
@@ -124,15 +124,17 @@ def main():
     tau_mean_np = tau_mean.cpu().numpy()
     tau_std_np  = tau_std.cpu().numpy()
     n_samples   = 0
+    tau_rmse = 0
 
     for batch_idx, (signal, _, coord_gt, tau_gt, phi, snr) in enumerate(test_loader):
         signal   = signal.to(device, non_blocking=True).float()
         coord_gt = coord_gt.cpu().numpy()[:, :3]   # [B, 3]
         tau_gt   = tau_gt.to(device, non_blocking=True).float()  # [B, M] physical seconds
         snr      = snr.to(device, non_blocking=True).float()     # [B, M] SNR values
-        pred_tau_phys = model(signal).cpu().numpy()                       # [B, M]
-        #pred_tau_phys = pred_tau_norm * tau_std_np + tau_mean_np          # [B, M] seconds
-        tau_error = pred_tau_phys - tau_gt.cpu().numpy()                                  # [B, M] seconds
+        pred_tau_norm = model(signal).cpu().numpy()                       # [B, M]
+        pred_tau_phys = pred_tau_norm * tau_std_np + tau_mean_np          # [B, M] seconds
+        tau_rmse += np.sum((np.linalg.norm(pred_tau_phys - tau_gt.cpu().numpy(), axis=1))**2)  # [B] seconds
+        tau_error_all.append((pred_tau_phys - tau_gt.cpu().numpy()) * 1e6)  # [B, M] in µs
         B = pred_tau_phys.shape[0]
         pred_xyz_batch = np.zeros((B, 3))
 
@@ -141,7 +143,6 @@ def main():
 
         pred_xyz_all.append(pred_xyz_batch)
         true_xyz_all.append(coord_gt)
-        tau_error_all.append(tau_error)
         n_samples += B
 
         if (batch_idx + 1) % 5 == 0:
@@ -149,82 +150,45 @@ def main():
 
     pred_xyz = np.concatenate(pred_xyz_all, axis=0)   # [N, 3]
     true_xyz = np.concatenate(true_xyz_all, axis=0)   # [N, 3]
-    tau_error = np.concatenate(tau_error_all, axis=0) # [N, M]
+    tau_rmse = np.sqrt(tau_rmse / n_samples) * 1e6  # convert to microseconds
+    print(f"\n── DelayNet evaluation on test set ({n_samples} samples) ──")
+    print(f"  Tau RMSE: {tau_rmse:.3f} microseconds")
 
     # ── Metrics ──────────────────────────────────────────────
     err_xyz  = pred_xyz - true_xyz                                      # [N, 3]
     err_3d   = np.linalg.norm(err_xyz, axis=1)                          # [N] 3-D error
     err_2d   = np.linalg.norm(err_xyz[:, :2], axis=1)                   # [N] 2-D (XY)
-    err_z    = np.abs(err_xyz[:, 2])                                     # [N] Z only
+    ##err_z    = np.abs(err_xyz[:, 2])                                     # [N] Z only
 
     print(f"\n── Multilateration evaluation on test set ({n_samples} samples) ──")
-    print(f"  3-D error  — mean:   {err_3d.mean():.2f} m   "
-          f"median: {np.median(err_3d):.2f} m   "
-          f"90th: {np.percentile(err_3d, 90):.2f} m   "
-          f"max: {err_3d.max():.2f} m")
-    print(f"  XY error   — mean:   {err_2d.mean():.2f} m   "
-          f"median: {np.median(err_2d):.2f} m")
-    print(f"  Z  error   — mean:   {err_z.mean():.2f} m   "
-          f"median: {np.median(err_z):.2f} m")
-    print(f"\n  Per-axis MAE:")
-    print(f"    X: {np.abs(err_xyz[:, 0]).mean():.2f} m")
-    print(f"    Y: {np.abs(err_xyz[:, 1]).mean():.2f} m")
-    print(f"    Z: {np.abs(err_xyz[:, 2]).mean():.2f} m")
-    print(f"\n  Tau error (physical) — mean: {tau_error.mean()*1e6:.4f} µs   "
-          f"median: {np.median(tau_error)*1e6:.4f} µs   "
-          f"90th: {np.percentile(tau_error, 90)*1e6:.4f} µs   "
-          f"max: {tau_error.max()*1e6:.4f} µs       ")
 
-    # ── Plots ─────────────────────────────────────────────────
-    fig, axes = plt.subplots(2, 3, figsize=(16, 9))
+    # ── Tau error histogram ────────────────────────────────────
+    tau_errors = np.concatenate(tau_error_all, axis=0).ravel()  # [N*M] in µs
+    abs_errors = np.abs(tau_errors)
 
-    def _hist(ax, data, label, unit="m"):
-        ax.hist(data, bins=60, edgecolor="black")
-        ax.axvline(data.mean(),         color="red",    linestyle="--",
-                   label=f"mean {data.mean():.2f} {unit}")
-        ax.axvline(np.median(data),     color="orange", linestyle="--",
-                   label=f"median {np.median(data):.2f} {unit}")
-        ax.set_xlabel(f"{label} ({unit})")
-        ax.set_ylabel("Count")
-        ax.set_title(f"{label} distribution")
-        ax.legend(fontsize=8)
+    print(f"\n── Tau error statistics (µs) ──")
+    print(f"  Mean signed : {tau_errors.mean():.4f}")
+    print(f"  Std         : {tau_errors.std():.4f}")
+    print(f"  Mean abs    : {abs_errors.mean():.4f}")
+    print(f"  Median abs  : {np.median(abs_errors):.4f}")
+    print(f"  90th pct    : {np.percentile(abs_errors, 90):.4f}")
 
-    _hist(axes[0, 0], err_3d, "3-D error")
-    _hist(axes[0, 1], err_2d, "XY error")
-    _hist(axes[0, 2], err_z,  "Z error")
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    fig.suptitle(f"Tau estimation errors — {n_samples} samples, {M_RECV} receivers each")
 
-    # CDF of 3-D error
-    sorted_3d = np.sort(err_3d)
-    axes[1, 0].plot(sorted_3d, np.linspace(0, 1, len(sorted_3d)))
-    axes[1, 0].set_xlabel("3-D error (m)")
-    axes[1, 0].set_ylabel("CDF")
-    axes[1, 0].set_title("Cumulative 3-D error")
-    axes[1, 0].grid(True)
-
-    # Predicted vs true scatter (XY plane)
-    sc = axes[1, 1].scatter(true_xyz[:, 0], true_xyz[:, 1],
-                            c=err_2d, cmap="viridis", s=4, alpha=0.6)
-    plt.colorbar(sc, ax=axes[1, 1], label="XY error (m)")
-    axes[1, 1].set_xlabel("X true (m)")
-    axes[1, 1].set_ylabel("Y true (m)")
-    axes[1, 1].set_title("XY error map")
-    axes[1, 1].set_aspect("equal")
-
-    # Z prediction vs true
-    axes[1, 2].scatter(true_xyz[:, 2], pred_xyz[:, 2], s=4, alpha=0.5)
-    z_lo = min(true_xyz[:, 2].min(), pred_xyz[:, 2].min())
-    z_hi = max(true_xyz[:, 2].max(), pred_xyz[:, 2].max())
-    axes[1, 2].plot([z_lo, z_hi], [z_lo, z_hi], "r--", label="ideal")
-    axes[1, 2].set_xlabel("Z true (m)")
-    axes[1, 2].set_ylabel("Z predicted (m)")
-    axes[1, 2].set_title("Z prediction vs truth")
-    axes[1, 2].legend()
+    # Signed error
+    axes[0].hist(tau_errors, bins=100, edgecolor="none", alpha=0.8, color="steelblue")
+    axes[0].axvline(tau_errors.mean(),     color="red",    linestyle="--",
+                    label=f"mean {tau_errors.mean():.4f} µs")
+    axes[0].axvline(np.median(tau_errors), color="orange", linestyle="--",
+                    label=f"median {np.median(tau_errors):.4f} µs")
+    axes[0].set_xlabel("τ error (µs)")
+    axes[0].set_ylabel("Count")
+    axes[0].set_title("Signed error")
+    axes[0].legend()
 
     plt.tight_layout()
-    out_path = Path(__file__).parent / "eval_delay_net_multilateration.png"
-    plt.savefig(out_path, dpi=150)
     plt.show()
-    print(f"\nSaved {out_path}")
 
 
 if __name__ == "__main__":

@@ -10,10 +10,29 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from model.delay_2_xyz_net import Delay2PredictionNet
+from model.delay_2_xyz_net import Delay2XYZNet
 from data_loaders.my_dataloader import RadarMatDataset
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
+
+def add_tau_noise_random(tau_norm, noise_std_min=0.0, noise_std_max=0.05, noise_prob=1.0):
+    """
+    Adds Gaussian noise with random std per batch.
+
+    tau_norm: [B, M]
+    """
+
+    if torch.rand(1, device=tau_norm.device).item() > noise_prob:
+        return tau_norm
+
+    noise_std = torch.empty(1, device=tau_norm.device).uniform_(
+        noise_std_min,
+        noise_std_max,
+    )
+
+    noise = noise_std * torch.randn_like(tau_norm)
+
+    return tau_norm + noise
 
 def compute_dataset_stats(dataset):
     """Compute per-feature mean and std of tau and coord[:3] over the full dataset."""
@@ -49,8 +68,16 @@ def train_one_epoch(model, loader, optimizer, device, scaler, use_amp,
         optimizer.zero_grad(set_to_none=True)
 
         with torch.amp.autocast('cuda', enabled=use_amp):
+            
             tau_norm = (tau - tau_mean) / tau_std
-            pred_norm  = model(tau_norm)
+            tau_noisy = add_tau_noise_random(
+                tau_norm,
+                noise_std_min=0.0,
+                noise_std_max=0.05,
+                noise_prob=1.0
+            )
+
+            pred_norm  = model(tau_noisy)
             # denormalize → compare in meters for loss
             pred_coord = pred_norm * coord_std + coord_mean
             loss = torch.linalg.vector_norm(pred_coord - coord, dim=1).mean()
@@ -122,11 +149,11 @@ def main():
     # -------------------------
 
     train_dataset = RadarMatDataset(
-        root_dir="D:\\radar-dataset-3D-noisy\\train",
+        root_dir="D:\\radar-dataset-clean\\train",
     )
 
     val_dataset = RadarMatDataset(
-        root_dir="D:\\radar-dataset-3D-noisy\\validation",
+        root_dir="D:\\radar-dataset-clean\\validation",
     )
 
     print("Computing normalisation statistics from train set...")
@@ -162,7 +189,7 @@ def main():
     # Model
     # -------------------------
 
-    model = Delay2PredictionNet(M).to(device)
+    model = Delay2XYZNet(M).to(device)
 
     optimizer = torch.optim.AdamW(
         model.parameters(),

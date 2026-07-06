@@ -32,7 +32,7 @@ alphaRange = [1, 1];
 snrRange   = [-5, 20]; %dB
 
 % Output folder
-datasetDir = "D:\temp\";
+datasetDir = "D:\radar-dataset-clean\";
 
 testDir  = fullfile(datasetDir, 'test');
 valDir   = fullfile(datasetDir, 'validation');
@@ -42,10 +42,16 @@ for d = {testDir, valDir, trainDir}
     if ~exist(d{1}, 'dir'), mkdir(d{1}); end
 end
 
-% Split boundaries (first 15% test, next 15% validation, rest train)
+% Split boundaries (15% test, 15% validation, rest train) — randomly shuffled
 nTest  = round(0.15 * numSamples);
 nVal   = round(0.15 * numSamples);
 % nTrain = numSamples - nTest - nVal  (remainder)
+
+perm = randperm(numSamples);          % random shuffle of all sample indices
+splitLabel = zeros(numSamples, 1);    % 1=test, 2=val, 3=train
+splitLabel(perm(1:nTest))              = 1;
+splitLabel(perm(nTest+1:nTest+nVal))   = 2;
+splitLabel(perm(nTest+nVal+1:end))     = 3;
 
 %% -------------------------------
 % Preallocate labels
@@ -88,7 +94,7 @@ for i = 1:numSamples
     % Generate heatmap
     %% ---------------------------------
 
-    [y_ell, tau, phi] = get_radar_response_noisy(p_target, alpha, SNR);
+    [y_ell, tau, phi] = get_radar_response(p_target, alpha, SNR);
 
     %% ---------------------------------
     % Normalize heatmap
@@ -115,12 +121,10 @@ for i = 1:numSamples
     % Determine split folder
     %% ---------------------------------
 
-    if i <= nTest
-        splitDir = testDir;
-    elseif i <= nTest + nVal
-        splitDir = valDir;
-    else
-        splitDir = trainDir;
+    switch splitLabel(i)
+        case 1, splitDir = testDir;
+        case 2, splitDir = valDir;
+        case 3, splitDir = trainDir;
     end
 
     parsave_sample( ...
