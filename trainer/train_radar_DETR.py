@@ -1,5 +1,17 @@
+from sched import scheduler
+import sys
+from pathlib import Path
+
+from data_loaders.my_dataloader import RadarMatDataset
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from scipy.optimize import linear_sum_assignment
 import torch
+from model.radar_DETR_v1 import RadarDETR
+from torch.utils.data import DataLoader
 
 
 def radar_detr_loss(
@@ -271,21 +283,166 @@ def training_step(
 
     return loss_dict
 
+@torch.no_grad()
+def detect_targets(model, y, area_radius, threshold=0.5):
+    """
+    y: complex [B, M, N]
+    area_radius: coordinate normalization scale in meters
+
+    returns:
+        list of detections per batch item:
+            [
+                {
+                    "pos_m": [num_det, 2],
+                    "score": [num_det]
+                },
+                ...
+            ]
+    """
+
+    model.eval()
+    outputs = model(y)
+
+    pos_norm = outputs["pos"]                 # [B, Q, 2]
+    prob = outputs["logits"].softmax(-1)[..., 1]  # [B, Q]
+
+    B, Q, _ = pos_norm.shape
+
+    all_dets = []
+
+    for b in range(B):
+        keep = prob[b] > threshold
+
+        pos_m = pos_norm[b, keep] * area_radius
+        score = prob[b, keep]
+
+        # Sort detections by score
+        order = torch.argsort(score, descending=True)
+
+        all_dets.append({
+            "pos_m": pos_m[order],
+            "score": score[order],
+        })
+
+    return all_dets
+
+def train_one_epoch(model, loader, optimizer, device, ds_stats, common_params):
+    model.train()
+
+    for signal, heatmap, coord, tau, phi, snr in loader:
+
+        coord_norm = (coord - ds_stats["coord_mean"]) / ds_stats["coord_std"]
+
+        batch = {
+            "y": signal.to(device, non_blocking=True).float(),
+            "pos_norm": [coord_norm.to(device, non_blocking=True).float()],
+            "pos_xyz": [coord.to(device, non_blocking=True).float()]
+        }
+
+        training_step(
+            model=model,
+            batch=batch,
+            optimizer=optimizer,
+            a=common_params.a,
+            fs=common_params.fs,
+            tx_pos=common_params.tx_pos,
+            lambda_spectrum=1.0,
+        )
+
+@torch.no_grad()
+def validate(model, loader, device, use_amp, ds_stats, common_params):
+    model.eval()
+    total_loss = 0.0
+
+    for signal, heatmap, coord, tau, phi, snr in loader:
+
+        coord_norm = (coord - ds_stats["coord_mean"]) / ds_stats["coord_std"]
+
+        batch = {
+            "y": signal.to(device, non_blocking=True).float(),
+            "pos_norm": [coord_norm.to(device, non_blocking=True).float()],
+            "pos_xyz": [coord.to(device, non_blocking=True).float()]
+        }
+
+        training_step(
+            model=model,
+            batch=batch,
+            optimizer=None,
+            a=common_params.a,
+            fs=common_params.fs,
+            tx_pos=common_params.tx_pos,
+            lambda_spectrum=1.0,
+        )
+
+
+def compute_dataset_stats(dataset):
+    """Compute per-feature mean and std of tau and coord[:2] over the full dataset."""
+    loader = DataLoader(dataset, batch_size=512, shuffle=False, num_workers=4)
+    all_tau, all_coord = [], []
+    for signal, heatmap, coord, tau, phi in loader:
+        all_tau.append(tau.float())
+        all_coord.append(coord.float()[..., :3])
+    all_tau = torch.cat(all_tau, dim=0)      # [N, M]
+    all_coord = torch.cat(all_coord, dim=0)  # [N, 3]
+    tau_std = all_tau.std(dim=0)
+    std_floor = torch.clamp(tau_std.mean() * 0.1, min=1e-6)
+    tau_std = tau_std.clamp(min=std_floor)
+    return (
+        all_tau.mean(dim=0), tau_std,
+        all_coord.mean(dim=0), all_coord.std(dim=0).clamp(min=1e-8),
+    )
+
 def main():
     
-    # Example
-    M = 40
-    n_fft = 2048
-    area_radius = 1000.0  # meters
+    # parameters
+    # common 
+    common_params = type('', (), {})()  # empty object to hold parameters
+    common_params.a = 1e13
+    common_params.fs = 5e7
+    common_params.M = 40
+    common_params.n_fft = 1024
+    common_params.rx_radius = 100 # m
+    
+    theta = 2 * torch.pi * torch.arange(common_params.M, dtype=torch.float32) / common_params.M
+    rx_pos_tensor = torch.stack([torch.cos(theta), torch.sin(theta), torch.zeros(common_params.M)], dim=1) * common_params.rx_radius
 
-    # rx_pos should be [M, 3] in meters
-    # Example: torch.tensor([...], dtype=torch.float32)
-    rx_pos = rx_pos_tensor
+    common_params.tx_pos = torch.zeros(3, dtype=torch.float32)  # transmitter at origin
+    common_params.rx_pos = rx_pos_tensor
+
+    # data loader parameters
+    batch_size = 16
+    num_workers = 4
+    use_cuda = torch.cuda.is_available()
+    device = torch.device("cuda" if use_cuda else "cpu")
+
+    train_dataset = RadarMatDataset(mat_dir="D:\\radar-dataset-multi-targets\\train")
+    validation_dataset = RadarMatDataset(mat_dir="D:\\radar-dataset-multi-targets\\validation")
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=use_cuda,
+        persistent_workers=num_workers > 0,
+    )
+
+    val_loader = DataLoader(
+        validation_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=use_cuda,
+        persistent_workers=num_workers > 0,
+    )
+
+    # compute data stats
+    ds_stats = compute_dataset_stats(train_dataset)
 
     model = RadarDETR(
-        M=M,
-        rx_pos=rx_pos,
-        n_fft=n_fft,
+        M=common_params.M,
+        rx_pos=common_params.rx_pos,
+        n_fft=common_params.n_fft,
         d_model=256,
         num_queries=8,   # good for Kmax=2 initially
         top_p=32,
@@ -298,3 +455,63 @@ def main():
         lr=1e-4,
         weight_decay=1e-4,
     )
+
+    scheduler = ReduceLROnPlateau(
+        optimizer,
+        mode='min',
+        factor=0.5,
+        patience=4,
+        threshold=1e-3,
+        min_lr=1e-6,
+    )
+
+    epochs = 20
+
+    best_val_loss = float("inf")
+
+    for epoch in range(1, epochs + 1):
+
+        train_loss = train_one_epoch(model,
+                                    train_loader,
+                                    optimizer, 
+                                    device, 
+                                    ds_stats, 
+                                    common_params)
+
+        val_loss = validate(model,
+                            val_loader,
+                            device,
+                            use_amp=False,
+                            ds_stats=ds_stats,
+                            common_params=common_params)
+
+        scheduler.step(val_loss)
+        current_lr = optimizer.param_groups[0]['lr']
+
+        print(
+            f"Epoch {epoch:03d} | "
+            f"train loss: {train_loss:.6f} | "
+            f"val loss: {val_loss:.6f} | "
+            f"lr: {current_lr:.2e}"
+        )
+
+        if val_loss < best_val_loss:
+        
+            best_val_loss = val_loss
+
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "val_loss": val_loss,
+                },
+                "best_radar_model.pt",
+            )
+
+            print("Saved best model")
+
+
+
+if __name__ == "__main__":
+    main()
