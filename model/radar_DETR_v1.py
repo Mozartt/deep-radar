@@ -105,7 +105,7 @@ class RadarDETR(nn.Module):
             nn.GELU(),
             nn.Linear(d_model, d_model),
             nn.GELU(),
-            nn.Linear(d_model, 2),
+            nn.Linear(d_model, 3),
             nn.Tanh(),  # output in [-1, 1]
         )
 
@@ -126,6 +126,9 @@ class RadarDETR(nn.Module):
         Y = torch.fft.fft(y, n=self.n_fft, dim=-1, norm="ortho")
         Y = torch.fft.fftshift(Y, dim=-1)
 
+        half_fft_size = self.n_fft // 2
+        Y = Y[..., :half_fft_size]  # [B, M, F] use only negative frequencies
+
         # Per-receiver normalization.
         # Keeps numerical scale stable.
         scale = Y.abs().amax(dim=-1, keepdim=True).clamp_min(1e-8)
@@ -138,12 +141,12 @@ class RadarDETR(nn.Module):
         x = torch.stack([re, im, logmag], dim=1)  # [B, 3, M, F]
         return x
 
-    def make_frequency_grid(self, device):
+    def make_frequency_grid(self, device, real_fft_size: int) -> torch.Tensor:
         """
         Returns normalized shifted frequency coordinates in [-1, 1].
         Shape: [F]
         """
-        f = torch.linspace(-1.0, 1.0, self.n_fft, device=device)
+        f = torch.linspace(-1.0, 1.0, real_fft_size, device=device)
         return f
 
     def select_top_tokens(self, feat, spectrum_logits):
@@ -171,7 +174,7 @@ class RadarDETR(nn.Module):
         tok_feat = torch.gather(feat_bmfc, dim=2, index=idx_feat)  # [B, M, P, C]
 
         # Frequency coordinate for selected bins
-        f_grid = self.make_frequency_grid(device)  # [F]
+        f_grid = self.make_frequency_grid(device, Freq)  # [F]
         f_bmf = f_grid.view(1, 1, Freq).expand(B, M, Freq)
         tok_f = torch.gather(f_bmf, dim=2, index=top_idx)  # [B, M, P]
         tok_f = tok_f.unsqueeze(-1)  # [B, M, P, 1]

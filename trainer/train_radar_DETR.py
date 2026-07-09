@@ -1,12 +1,11 @@
-from sched import scheduler
 import sys
 from pathlib import Path
-
-from data_loaders.my_dataloader import RadarMatDataset
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+import torch.nn.functional as F
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+from data_loaders.dataloader_multi_targets import RadarMatDatasetMT
 
 from scipy.optimize import linear_sum_assignment
 import torch
@@ -17,6 +16,7 @@ from torch.utils.data import DataLoader
 def radar_detr_loss(
     outputs,
     targets,
+    targets_cnt,
     lambda_pos=5.0,
     lambda_obj=1.0,
     no_object_weight=0.1,
@@ -57,15 +57,15 @@ def radar_detr_loss(
     total_matches = 0
 
     for b in range(B):
-        tgt_pos = targets[b]["pos"].to(device)  # [K, 2]
-        K = tgt_pos.shape[0]
+        tgt_pos = targets[b]["pos"].to(device)  # [K, 3]
+        K = targets_cnt[b]["num_targets"].item()  # [B,1]
 
         # Default: all queries are no-target
         target_classes = torch.zeros(Q, dtype=torch.long, device=device)
 
         if K > 0:
             # Pairwise L1 distance: [Q, K]
-            cost_pos = torch.cdist(pred_pos[b], tgt_pos, p=1)
+            cost_pos = torch.cdist(pred_pos[b], tgt_pos[:K,:], p=1)
 
             # Objectness probability
             prob_target = pred_logits[b].softmax(dim=-1)[:, 1]  # [Q]
@@ -172,6 +172,7 @@ def build_spectrum_target_from_tau(
     # Shifted FFT frequency grid in Hz
     freqs = torch.fft.fftfreq(n_fft, d=1.0 / fs).to(device)
     freqs = torch.fft.fftshift(freqs)  # [F]
+    freqs = freqs[:Freq//2]  # use only negative frequencies
 
     bin_width = fs / n_fft
     sigma_hz = sigma_bins * bin_width
@@ -179,14 +180,13 @@ def build_spectrum_target_from_tau(
     # Beat frequency according to your sign convention
     fb = -a * tau  # [B, K, M]
 
-    diff = freqs.view(1, 1, 1, Freq) - fb.unsqueeze(-1)
+    diff = freqs.view(1, 1, 1, Freq//2) - fb.unsqueeze(-1)
     gauss = torch.exp(-0.5 * (diff / sigma_hz) ** 2)  # [B, K, M, F]
 
     # Multi-target spectrum: max over target peaks
     target = gauss.max(dim=1).values  # [B, M, F]
 
     return target.unsqueeze(1)  # [B, 1, M, F]
-
 
 def spectrum_aux_loss(spectrum_logits, spectrum_target, pos_weight=5.0):
     """
@@ -226,12 +226,16 @@ def training_step(
         {"pos": p} for p in batch["pos_norm"]
     ]
 
-    loss_detr, loss_dict = radar_detr_loss(outputs, targets)
+    targets_cnt = [
+        {"num_targets": n} for n in batch["num_targets"]
+    ]
+
+    loss_detr, loss_dict = radar_detr_loss(outputs, targets, targets_cnt)
 
     # Optional spectral auxiliary loss
     # This assumes batch["pos_xyz"] is a list of tensors [K, 3].
     pos_xyz_list = batch["pos_xyz"]
-    max_k = max(p.shape[0] for p in pos_xyz_list)
+    max_k = torch.amax(batch["num_targets"])
 
     if max_k > 0:
         B = len(pos_xyz_list)
@@ -241,9 +245,10 @@ def training_step(
         valid = torch.zeros(B, max_k, dtype=torch.bool, device=device)
 
         for b, p in enumerate(pos_xyz_list):
-            K = p.shape[0]
+            K = targets_cnt[b]["num_targets"].item()
+
             if K > 0:
-                padded[b, :K] = p.to(device)
+                padded[b, :K] = p[:K,:].to(device)
                 valid[b, :K] = True
 
         tau = bistatic_tau(
@@ -329,17 +334,21 @@ def detect_targets(model, y, area_radius, threshold=0.5):
 def train_one_epoch(model, loader, optimizer, device, ds_stats, common_params):
     model.train()
 
-    for signal, heatmap, coord, tau, phi, snr in loader:
+    for signal, heatmap, coord, tau, phi, snr, numTargets in loader:
 
-        coord_norm = (coord - ds_stats["coord_mean"]) / ds_stats["coord_std"]
+        # coord is a list of [K_i, 3] tensors (K_i may differ between samples)
+        coord_norm = (coord.float() - ds_stats["coord_mean"]) / ds_stats["coord_sd"]
+        coord_norm = coord_norm.to(device, non_blocking=True)
 
+        y_complex = torch.complex(signal[:, 0,:,:].float(), signal[:, 1,:,:].float())  # [B, M, N]
         batch = {
-            "y": signal.to(device, non_blocking=True).float(),
-            "pos_norm": [coord_norm.to(device, non_blocking=True).float()],
-            "pos_xyz": [coord.to(device, non_blocking=True).float()]
+            "y": y_complex.to(device, non_blocking=True),
+            "pos_norm": coord_norm,                                   # list of [K_i, 3]
+            "pos_xyz":  coord.to(device).float(),        # list of [K_i, 3]
+            "num_targets": numTargets.to(device, non_blocking=True), # B,1
         }
 
-        training_step(
+        loss_dict = training_step(
             model=model,
             batch=batch,
             optimizer=optimizer,
@@ -348,49 +357,81 @@ def train_one_epoch(model, loader, optimizer, device, ds_stats, common_params):
             tx_pos=common_params.tx_pos,
             lambda_spectrum=1.0,
         )
+        total_loss += loss_dict["loss_total"].item() * signal.size(0)
+
+    return total_loss / len(loader.dataset)
 
 @torch.no_grad()
 def validate(model, loader, device, use_amp, ds_stats, common_params):
     model.eval()
     total_loss = 0.0
 
-    for signal, heatmap, coord, tau, phi, snr in loader:
+    for signal, heatmap, coord, tau, phi, snr, numTargets in loader:
 
-        coord_norm = (coord - ds_stats["coord_mean"]) / ds_stats["coord_std"]
+        # coord is a list of [K_i, 3] tensors (K_i may differ between samples)
+        coord_norm = [
+            (c.to(device).float() - ds_stats["coord_mean"]) / ds_stats["coord_std"]
+            for c in coord
+        ]
 
         batch = {
             "y": signal.to(device, non_blocking=True).float(),
-            "pos_norm": [coord_norm.to(device, non_blocking=True).float()],
-            "pos_xyz": [coord.to(device, non_blocking=True).float()]
+            "pos_norm": coord_norm,                                   # list of [K_i, 3]
+            "pos_xyz":  [c.to(device).float() for c in coord],        # list of [K_i, 3]
         }
 
-        training_step(
-            model=model,
-            batch=batch,
-            optimizer=None,
-            a=common_params.a,
-            fs=common_params.fs,
-            tx_pos=common_params.tx_pos,
-            lambda_spectrum=1.0,
-        )
+        outputs = model(batch["y"])
+        
+
 
 
 def compute_dataset_stats(dataset):
-    """Compute per-feature mean and std of tau and coord[:2] over the full dataset."""
+    """Compute mean/std of individual target positions over the full dataset."""
+    # use .pt cache 
+    if Path("dataset_stats.pt").exists():
+        stats = torch.load("dataset_stats.pt")
+        return stats
+    
     loader = DataLoader(dataset, batch_size=512, shuffle=False, num_workers=4)
-    all_tau, all_coord = [], []
-    for signal, heatmap, coord, tau, phi in loader:
+    all_tau = []
+    all_coord = []
+    for signal, heatmap, coord, tau, phi, snr, numTargets in loader:
         all_tau.append(tau.float())
-        all_coord.append(coord.float()[..., :3])
-    all_tau = torch.cat(all_tau, dim=0)      # [N, M]
-    all_coord = torch.cat(all_coord, dim=0)  # [N, 3]
-    tau_std = all_tau.std(dim=0)
-    std_floor = torch.clamp(tau_std.mean() * 0.1, min=1e-6)
-    tau_std = tau_std.clamp(min=std_floor)
-    return (
-        all_tau.mean(dim=0), tau_std,
-        all_coord.mean(dim=0), all_coord.std(dim=0).clamp(min=1e-8),
-    )
+        all_coord.append(coord)  # list of [K_i, 3] tensors
+
+    all_tau = torch.cat(all_tau, dim=0)   # [N_total_targets, M]
+    all_coord = torch.cat(all_coord, dim=0)   # [N_total_targets, 3]
+
+    # tau mean
+    tau_mask = (all_tau != 0).float()
+    sum_tau = (all_tau * tau_mask).sum(dim=(0, 2))
+    count_tau = tau_mask.sum(dim=(0, 2))
+    tau_mean = sum_tau / count_tau.clamp(min=1.0)
+
+    # tau std
+    tau_var = ((all_tau - tau_mean[None,:,None]) ** 2 * tau_mask).sum(dim=(0, 2)) / count_tau.clamp(min=1.0)
+    tau_sd = tau_var.sqrt()
+    std_floor = tau_sd.mean() * 0.1
+    tau_sd = tau_sd.clamp(min=std_floor)
+
+    # coord mean
+    coord_mask = (all_coord != 0).float()
+    sum_coord = (all_coord * coord_mask).sum(dim=(0, 1))
+    count_coord = coord_mask.sum(dim=(0, 1))
+    coord_mean = sum_coord / count_coord.clamp(min=1.0)
+    # coord std
+    coord_var = ((all_coord - coord_mean) ** 2 * coord_mask).sum(dim=(0, 1)) / count_coord.clamp(min=1.0)
+    coord_sd = coord_var.sqrt()
+
+    stats = {}
+    stats["tau_mean"] = tau_mean
+    stats["tau_sd"] = tau_sd
+    stats["coord_mean"] = coord_mean
+    stats["coord_sd"] = coord_sd
+
+    torch.save(stats, "dataset_stats.pt")
+
+    return stats
 
 def main():
     
@@ -415,8 +456,8 @@ def main():
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda" if use_cuda else "cpu")
 
-    train_dataset = RadarMatDataset(mat_dir="D:\\radar-dataset-multi-targets\\train")
-    validation_dataset = RadarMatDataset(mat_dir="D:\\radar-dataset-multi-targets\\validation")
+    train_dataset = RadarMatDatasetMT(root_dir="D:\\radar-dataset-multi-targets\\train")
+    validation_dataset = RadarMatDatasetMT(root_dir="D:\\radar-dataset-multi-targets\\validation")
 
     train_loader = DataLoader(
         train_dataset,
@@ -424,7 +465,7 @@ def main():
         shuffle=True,
         num_workers=num_workers,
         pin_memory=use_cuda,
-        persistent_workers=num_workers > 0,
+        persistent_workers=num_workers > 0
     )
 
     val_loader = DataLoader(
@@ -433,7 +474,7 @@ def main():
         shuffle=False,
         num_workers=num_workers,
         pin_memory=use_cuda,
-        persistent_workers=num_workers > 0,
+        persistent_workers=num_workers > 0
     )
 
     # compute data stats
@@ -448,7 +489,7 @@ def main():
         top_p=32,
         num_decoder_layers=3,
         nhead=8,
-    )
+    ).to(device)
 
     optimizer = torch.optim.AdamW(
         model.parameters(),

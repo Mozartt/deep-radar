@@ -15,7 +15,7 @@ P_trnsmt = zeros(3,1); % Transmitter location [x;y;z] [meters]
 theta = 2 * pi * (0 : M-1)./M; % radians
 q = 100*[cos(theta); sin(theta); zeros(size(theta)) ]; % antenna locations [meters
 
-[y_total, tau_all, phi_all] = deal(0, [], []);
+[y_total, tau_all, phi_all] = deal(0, zeros(M,numOfTargets), zeros(M,numOfTargets));
 
 for k = 1:numOfTargets
     P_trgt = targets(k, :).'; % Target location [x;y;z] [meters]

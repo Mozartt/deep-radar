@@ -1,4 +1,4 @@
-function [targets, quadrants] = sample_targets_by_quadrants(r_min, r_max, z_min, z_max, max_targets)
+function [targets, K] = sample_targets_by_quadrants(r_min, r_max, z_min, z_max, max_targets)
     %SAMPLE_TARGETS_BY_QUADRANTS
     % Randomly samples 1 to max_targets targets.
     % Each target is placed in a different quadrant.
@@ -16,7 +16,7 @@ function [targets, quadrants] = sample_targets_by_quadrants(r_min, r_max, z_min,
     quadrants = all_quadrants(1:K).';
 
     % Allocate target matrix
-    targets = zeros(K, 3);
+    targets = zeros(max_targets, 3);
 
     for i = 1:K
         q = quadrants(i);
