@@ -38,7 +38,7 @@ def main():
 
     # ── Dataset ──────────────────────────────────────────────
     train_dataset = RadarMatDataset(root_dir="D:\\radar-dataset-delay-only\\train")
-    val_dataset   = RadarMatDataset(root_dir="D:\\radar-dataset-delay-only\\validation")
+    test_dataset   = RadarMatDataset(root_dir="D:\\radar-dataset-delay-only\\test")
 
     print("Computing tau normalisation stats from train set...")
     tau_mean, tau_std = compute_tau_stats(train_dataset)
@@ -48,8 +48,8 @@ def main():
     print(f"  M={M}  tau_mean(avg)={tau_mean.mean().item()*1e6:.4f} µs  "
           f"tau_std(avg)={tau_std.mean().item()*1e6:.4f} µs")
 
-    val_loader = DataLoader(
-        val_dataset, batch_size=64, shuffle=False,
+    test_loader = DataLoader(
+        test_dataset, batch_size=64, shuffle=False,
         num_workers=4, pin_memory=use_cuda,
     )
 
@@ -66,7 +66,7 @@ def main():
     per_receiver_abs_us = []   # [N, M]
     per_sample_l2_us    = []   # [N]
 
-    for signal, _, _, tau_gt in val_loader:
+    for signal, _, _, tau_gt in test_loader:
         signal = signal.to(device, non_blocking=True).float()
         tau_gt = tau_gt.to(device, non_blocking=True).float()  # [B, M] physical
 

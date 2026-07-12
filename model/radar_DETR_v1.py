@@ -32,7 +32,7 @@ class RadarDETR(nn.Module):
 
     Output:
         dict:
-            pos:    [B, num_queries, 2] normalized xy in [-1, 1]
+            pos:    [B, num_queries, 3] normalized xy in [-1, 1]
             logits: [B, num_queries, 2] no-target / target logits
             spectrum_logits: [B, 1, M, F]
     """
@@ -41,12 +41,13 @@ class RadarDETR(nn.Module):
         self,
         M: int,
         rx_pos: torch.Tensor,
-        n_fft: int = 2048,
+        n_fft: int = 1024,
         d_model: int = 256,
         num_queries: int = 8,
         top_p: int = 32,
         num_decoder_layers: int = 3,
         nhead: int = 8,
+        common_params=None,
     ):
         super().__init__()
 
@@ -55,6 +56,7 @@ class RadarDETR(nn.Module):
         self.d_model = d_model
         self.num_queries = num_queries
         self.top_p = top_p
+        self.fs = common_params.fs
 
         # receiver positions [M, 3]
         # stored as buffer so it moves with model.to(device)
@@ -146,8 +148,15 @@ class RadarDETR(nn.Module):
         Returns normalized shifted frequency coordinates in [-1, 1].
         Shape: [F]
         """
-        f = torch.linspace(-1.0, 1.0, real_fft_size, device=device)
-        return f
+        freqs = torch.fft.fftfreq(
+            self.n_fft,
+            d=1.0 / self.fs,
+            device=device,
+        )
+        freqs = torch.fft.fftshift(freqs)
+        freqs = freqs[: self.n_fft // 2]
+
+        return freqs / (self.fs / 2)
 
     def select_top_tokens(self, feat, spectrum_logits):
         """
@@ -174,7 +183,7 @@ class RadarDETR(nn.Module):
         tok_feat = torch.gather(feat_bmfc, dim=2, index=idx_feat)  # [B, M, P, C]
 
         # Frequency coordinate for selected bins
-        f_grid = self.make_frequency_grid(device, Freq)  # [F]
+        f_grid = self.make_frequency_grid(device, self.n_fft)  # [F]
         f_bmf = f_grid.view(1, 1, Freq).expand(B, M, Freq)
         tok_f = torch.gather(f_bmf, dim=2, index=top_idx)  # [B, M, P]
         tok_f = tok_f.unsqueeze(-1)  # [B, M, P, 1]

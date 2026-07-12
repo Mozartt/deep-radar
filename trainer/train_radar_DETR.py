@@ -147,7 +147,6 @@ def bistatic_tau(points, tx_pos, rx_pos, c=3e8):
     tau = (d_tx.unsqueeze(-1) + d_rx) / c
     return tau
 
-
 def build_spectrum_target_from_tau(
     tau,
     a,
@@ -205,22 +204,7 @@ def spectrum_aux_loss(spectrum_logits, spectrum_target, pos_weight=5.0):
 
     return loss
 
-def training_step(
-    model,
-    batch,
-    optimizer,
-    a,
-    fs,
-    tx_pos,
-    lambda_spectrum=1.0,
-):
-    model.train()
-    optimizer.zero_grad()
-
-    y = batch["y"]  # complex [B, M, N]
-
-    outputs = model(y)
-
+def radar_full_loss(outputs, batch, common_params,lambda_spectrum=1.0):
     # DETR target format
     targets = [
         {"pos": p} for p in batch["pos_norm"]
@@ -239,7 +223,7 @@ def training_step(
 
     if max_k > 0:
         B = len(pos_xyz_list)
-        device = y.device
+        device = batch["y"].device
 
         padded = torch.zeros(B, max_k, 3, device=device)
         valid = torch.zeros(B, max_k, dtype=torch.bool, device=device)
@@ -253,8 +237,8 @@ def training_step(
 
         tau = bistatic_tau(
             padded,
-            tx_pos=tx_pos.to(device),
-            rx_pos=model.rx_pos,
+            tx_pos=common_params.tx_pos.to(device),
+            rx_pos=common_params.rx_pos,
         )  # [B, max_k, M]
 
         # For invalid padded targets, move their tau far outside observable range
@@ -262,9 +246,9 @@ def training_step(
 
         spectrum_target = build_spectrum_target_from_tau(
             tau=tau,
-            a=a,
-            fs=fs,
-            n_fft=model.n_fft,
+            a=common_params.a,
+            fs=common_params.fs,
+            n_fft=common_params.n_fft,
             sigma_bins=1.5,
         )
 
@@ -275,16 +259,38 @@ def training_step(
     else:
         loss_spec = outputs["spectrum_logits"].sum() * 0.0
 
-    loss = loss_detr + lambda_spectrum * loss_spec
+    total_loss = loss_detr + lambda_spectrum * loss_spec
 
-    loss.backward()
+    loss_dict["loss_spectrum"] = loss_spec
+    loss_dict["loss_total"] = total_loss
+
+    return loss_dict
+
+def training_step(
+    model,
+    batch,
+    optimizer,
+    common_params,
+    lambda_spectrum=1.0,
+):
+    model.train()
+    optimizer.zero_grad()
+
+    y = batch["y"]  # complex [B, M, N]
+
+    outputs = model(y)
+
+    loss_dict = radar_full_loss(outputs, batch, common_params, lambda_spectrum=lambda_spectrum)
+
+    loss_dict["loss_total"].backward()
 
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
     optimizer.step()
 
-    loss_dict["loss_spectrum"] = loss_spec.detach()
-    loss_dict["loss_total"] = loss.detach()
+    # detach loss tensors, for logging only
+    loss_dict["loss_total"] = loss_dict["loss_total"].detach()
+    loss_dict["loss_spectrum"] = loss_dict["loss_spectrum"].detach()
 
     return loss_dict
 
@@ -334,6 +340,8 @@ def detect_targets(model, y, area_radius, threshold=0.5):
 def train_one_epoch(model, loader, optimizer, device, ds_stats, common_params):
     model.train()
 
+    total_loss = 0.0
+
     for signal, heatmap, coord, tau, phi, snr, numTargets in loader:
 
         # coord is a list of [K_i, 3] tensors (K_i may differ between samples)
@@ -352,11 +360,10 @@ def train_one_epoch(model, loader, optimizer, device, ds_stats, common_params):
             model=model,
             batch=batch,
             optimizer=optimizer,
-            a=common_params.a,
-            fs=common_params.fs,
-            tx_pos=common_params.tx_pos,
+            common_params=common_params,
             lambda_spectrum=1.0,
         )
+
         total_loss += loss_dict["loss_total"].item() * signal.size(0)
 
     return total_loss / len(loader.dataset)
@@ -368,22 +375,28 @@ def validate(model, loader, device, use_amp, ds_stats, common_params):
 
     for signal, heatmap, coord, tau, phi, snr, numTargets in loader:
 
-        # coord is a list of [K_i, 3] tensors (K_i may differ between samples)
-        coord_norm = [
-            (c.to(device).float() - ds_stats["coord_mean"]) / ds_stats["coord_std"]
-            for c in coord
-        ]
+        coord_norm = (coord.float() - ds_stats["coord_mean"]) / ds_stats["coord_sd"]
+        coord_norm = coord_norm.to(device, non_blocking=True)
 
+        y_complex = torch.complex(signal[:, 0,:,:].float(), signal[:, 1,:,:].float())  # [B, M, N]
         batch = {
-            "y": signal.to(device, non_blocking=True).float(),
+            "y": y_complex.to(device, non_blocking=True),
             "pos_norm": coord_norm,                                   # list of [K_i, 3]
-            "pos_xyz":  [c.to(device).float() for c in coord],        # list of [K_i, 3]
+            "pos_xyz":  coord.to(device).float(),        # list of [K_i, 3]
+            "num_targets": numTargets.to(device, non_blocking=True), # B,1
         }
 
         outputs = model(batch["y"])
-        
 
+        loss_dict = radar_full_loss(outputs, batch, common_params, lambda_spectrum=1.0)
 
+        # detach loss tensors, for logging only
+        loss_dict["loss_total"] = loss_dict["loss_total"].detach()
+        loss_dict["loss_spectrum"] = loss_dict["loss_spectrum"].detach()
+
+        total_loss += loss_dict["loss_total"].item() * signal.size(0)
+
+    return total_loss / len(loader.dataset)
 
 def compute_dataset_stats(dataset):
     """Compute mean/std of individual target positions over the full dataset."""
@@ -451,13 +464,15 @@ def main():
     common_params.rx_pos = rx_pos_tensor
 
     # data loader parameters
-    batch_size = 16
+    batch_size = 32
     num_workers = 4
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda" if use_cuda else "cpu")
 
     train_dataset = RadarMatDatasetMT(root_dir="D:\\radar-dataset-multi-targets\\train")
     validation_dataset = RadarMatDatasetMT(root_dir="D:\\radar-dataset-multi-targets\\validation")
+    # train_dataset = RadarMatDatasetMT(root_dir="D:\\temp\\train")
+    # validation_dataset = RadarMatDatasetMT(root_dir="D:\\temp\\validation")
 
     train_loader = DataLoader(
         train_dataset,
@@ -489,6 +504,7 @@ def main():
         top_p=32,
         num_decoder_layers=3,
         nhead=8,
+        common_params=common_params,
     ).to(device)
 
     optimizer = torch.optim.AdamW(
