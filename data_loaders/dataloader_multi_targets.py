@@ -37,11 +37,13 @@ class RadarMatDatasetMT(Dataset):
 	def __getitem__(self, idx: int):
 		sample = _load_sample_dict(self.file_paths[idx])
 		signal = _to_signal_tensor(sample["y_ell"])
+		signal_clean = _to_signal_tensor(sample["y_clean"])
 		heatmap = _to_heatmap_tensor(sample["heatmap"])
 		coord = _to_coord_tensor(sample["target_xyz"])        # [MAX_TARGETS, 3]
 		tau = _to_tau_tensor(sample["tau"])                   # [M, MAX_TARGETS]
 		phi = _to_tau_tensor(sample["phi"])                   # [M, MAX_TARGETS]
 		num_targets = _to_num_targets_tensor(sample["num_targets"])  # scalar long
+		sample_id = _to_sample_id_tensor(sample["sample_id"])
 		snr = sample.get("SNR", sample.get("snr"))
 		if snr is None:
 			raise KeyError("Field 'SNR' missing in sample")
@@ -55,7 +57,7 @@ class RadarMatDatasetMT(Dataset):
 			snr_tensor = torch.empty(1).uniform_(-5.0, 20.0).squeeze()
 			signal = _add_noise(signal, snr_tensor)
 
-		return signal, heatmap, coord, tau, phi, snr_tensor, num_targets
+		return signal, signal_clean, heatmap, coord, tau, phi, snr_tensor, num_targets, sample_id
         
 
 def _add_noise(signal: torch.Tensor, snr_db: torch.Tensor) -> torch.Tensor:
@@ -105,12 +107,14 @@ def _load_sample_with_scipy(file_path: Path) -> Dict[str, Any]:
 	if hasattr(sample_obj, "y_ell"):
 		return {
 			"y_ell": sample_obj.y_ell,
+			"y_clean": sample_obj.y_clean,
 			"heatmap": sample_obj.heatmap,
 			"target_xyz": sample_obj.target_xyz,
 			"tau": sample_obj.tau,
 			"phi": sample_obj.phi,
 			"SNR": getattr(sample_obj, "SNR", None),
 			"num_targets": sample_obj.numTargets,
+			"sample_id": sample_obj.sample_id,
 		}
 
 	if isinstance(sample_obj, np.ndarray) and sample_obj.dtype.names:
@@ -118,12 +122,14 @@ def _load_sample_with_scipy(file_path: Path) -> Dict[str, Any]:
 		has_snr = "SNR" in elem.dtype.names
 		return {
 			"y_ell": elem["y_ell"],
+			"y_clean": elem["y_clean"],
 			"heatmap": elem["heatmap"],
 			"target_xyz": elem["target_xyz"],
 			"tau": elem["tau"],
 			"phi": elem["phi"],
 			"SNR": elem["SNR"] if has_snr else None,
 			"num_targets": elem["numTargets"],
+			"sample_id": elem["sample_id"],
 		}
 	
 def _load_sample_with_h5py(file_path: Path) -> Dict[str, Any]:
@@ -145,6 +151,8 @@ def _load_sample_with_h5py(file_path: Path) -> Dict[str, Any]:
 			"phi": _read_h5_field(f, sample_group, "phi"),
 			"SNR": _read_h5_optional_field(f, sample_group, "SNR"),
 			"num_targets": _read_h5_field(f, sample_group, "numTargets"),
+			"y_clean": _read_h5_field(f, sample_group, "y_clean"),
+			"sample_id": _read_h5_field(f, sample_group, "sample_id"),
 		}
 
 
@@ -254,6 +262,10 @@ def _to_tau_tensor(tau: Any) -> torch.Tensor:
 
 
 def _to_num_targets_tensor(value: Any) -> torch.Tensor:
+	return torch.tensor(int(np.asarray(value).reshape(-1)[0]), dtype=torch.long)
+
+
+def _to_sample_id_tensor(value: Any) -> torch.Tensor:
 	return torch.tensor(int(np.asarray(value).reshape(-1)[0]), dtype=torch.long)
 
 

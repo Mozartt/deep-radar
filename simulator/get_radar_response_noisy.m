@@ -1,4 +1,4 @@
-function [y_clean, y_ell, tau_all, phi_all] = get_radar_response_noisy(targets, alfa, SNR_dB, numOfTargets)
+function [y_clean, y_ell, tau_all, phi_all] = get_radar_response_noisy(targets, alfa, SNR_dB, maxTargets, K)
 
 c = 3e8; % light speed [m/S]
 fc = 2e9; % center freq [Hz]
@@ -15,9 +15,9 @@ P_trnsmt = zeros(3,1); % Transmitter location [x;y;z] [meters]
 theta = 2 * pi * (0 : M-1)./M; % radians
 q = 100*[cos(theta); sin(theta); zeros(size(theta)) ]; % antenna locations [meters
 
-[y_total, tau_all, phi_all] = deal(0, zeros(M,numOfTargets), zeros(M,numOfTargets));
+[y_total, tau_all, phi_all] = deal(0, zeros(M,maxTargets), zeros(M,maxTargets));
 
-for k = 1:numOfTargets
+for k = 1:K
     P_trgt = targets(k, :).'; % Target location [x;y;z] [meters]
     [y_ell, tau, phi] = Radar_Response(P_trnsmt,q,P_trgt,fc,a,Ts,n,c,Tc);
     y_ell = alfa * y_ell;

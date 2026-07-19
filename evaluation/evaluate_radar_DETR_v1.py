@@ -20,7 +20,8 @@ from Utils import common_params as CP
 from trainer.train_radar_DETR import radar_full_loss
 
 def main():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    #device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cpu")
     use_cuda = device.type == "cuda"
     gpu_label = torch.cuda.get_device_name(0) if use_cuda else "CPU"
     print(f"Using {gpu_label}")
@@ -50,6 +51,7 @@ def main():
         top_p=32,
         num_decoder_layers=3,
         nhead=8,
+        common_params=common_params
     ).to(device)
 
     ckpt = torch.load("DETR_v1.pt",  map_location=device, weights_only=True)
@@ -59,24 +61,25 @@ def main():
 
     treshhold = 0.5
 
-    for signal, heatmap, coord, tau, phi, snr, numTargets in test_loader:
+    for signal, signal_clean, heatmap, coord, tau, phi, snr, numTargets, sample_id in test_loader:
         
-        y_complex = torch.complex(signal[:, 0,:,:].float(), signal[:, 1,:,:].float())  # [B, M, N]
-        outputs = model(y_complex.to(device, non_blocking=True))
+        #y_complex = torch.complex(signal[:, 0,:,:].float(), signal[:, 1,:,:].float())  # [B, M, N]
+        with torch.no_grad():
+            outputs = model(signal_clean.to(device, non_blocking=True).float())
 
         locations = outputs["pos"]
-        prob = outputs["logits"].softmax(-1)[..., 1]  # [B, Q]
+        prob = outputs["spectrum_logits"]
 
         locations_un_norm = locations * ds_stats["coord_sd"].to(device) + ds_stats["coord_mean"].to(device)  # [B, Q, 2]
         coord_norm = (coord.float() - ds_stats["coord_mean"]) / ds_stats["coord_sd"]
         coord_norm = coord_norm.to(device, non_blocking=True)
         batch = {
-            "y": y_complex.to(device, non_blocking=True),
+            "y": signal.to(device, non_blocking=True).float(),
             "pos_norm": coord_norm,                                   # list of [K_i, 3]
             "pos_xyz":  coord.to(device).float(),        # list of [K_i, 3]
             "num_targets": numTargets.to(device, non_blocking=True), # B,1
         }
-        loss = radar_full_loss(outputs, batch, common_params)
+        loss = radar_full_loss(outputs, batch, common_params, ds_stats)
         B, Q = prob.shape
         all_dets = []
 

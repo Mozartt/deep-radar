@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from xml.parsers.expat import model
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -11,12 +12,14 @@ from scipy.optimize import linear_sum_assignment
 import torch
 from model.radar_DETR_v1 import RadarDETR
 from torch.utils.data import DataLoader
+from torch.nn import DataParallel
 
 
 def radar_detr_loss(
     outputs,
     targets,
     targets_cnt,
+    ds_stats,
     lambda_pos=5.0,
     lambda_obj=1.0,
     no_object_weight=0.1,
@@ -204,7 +207,7 @@ def spectrum_aux_loss(spectrum_logits, spectrum_target, pos_weight=5.0):
 
     return loss
 
-def radar_full_loss(outputs, batch, common_params,lambda_spectrum=1.0):
+def radar_full_loss(outputs, batch, common_params, ds_stats, lambda_spectrum=1.0):
     # DETR target format
     targets = [
         {"pos": p} for p in batch["pos_norm"]
@@ -214,7 +217,7 @@ def radar_full_loss(outputs, batch, common_params,lambda_spectrum=1.0):
         {"num_targets": n} for n in batch["num_targets"]
     ]
 
-    loss_detr, loss_dict = radar_detr_loss(outputs, targets, targets_cnt)
+    loss_detr, loss_dict = radar_detr_loss(outputs, targets, targets_cnt, ds_stats)
 
     # Optional spectral auxiliary loss
     # This assumes batch["pos_xyz"] is a list of tensors [K, 3].
@@ -276,18 +279,24 @@ def training_step(
     model.train()
     optimizer.zero_grad()
 
-    y = batch["y"]  # complex [B, M, N]
+    y = batch["y"]  # real [B, 2, M, N] (I/Q channels)
 
     outputs = model(y)
 
     loss_dict = radar_full_loss(outputs, batch, common_params, lambda_spectrum=lambda_spectrum)
 
+    # before = {
+    #     name: p.detach().clone()
+    #     for name, p in model.named_parameters()
+    #     if "pos_head" in name
+    # }
+    
     loss_dict["loss_total"].backward()
 
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
     optimizer.step()
-
+    
     # detach loss tensors, for logging only
     loss_dict["loss_total"] = loss_dict["loss_total"].detach()
     loss_dict["loss_spectrum"] = loss_dict["loss_spectrum"].detach()
@@ -342,15 +351,15 @@ def train_one_epoch(model, loader, optimizer, device, ds_stats, common_params):
 
     total_loss = 0.0
 
-    for signal, heatmap, coord, tau, phi, snr, numTargets in loader:
+    for signal, signal_clean, heatmap, coord, tau, phi, snr, numTargets, sample_id in loader:
 
         # coord is a list of [K_i, 3] tensors (K_i may differ between samples)
         coord_norm = (coord.float() - ds_stats["coord_mean"]) / ds_stats["coord_sd"]
         coord_norm = coord_norm.to(device, non_blocking=True)
 
-        y_complex = torch.complex(signal[:, 0,:,:].float(), signal[:, 1,:,:].float())  # [B, M, N]
         batch = {
-            "y": y_complex.to(device, non_blocking=True),
+            #"y": signal.to(device, non_blocking=True).float(),  # real [B, 2, M, N]
+            "y": signal_clean.to(device, non_blocking=True).float(),
             "pos_norm": coord_norm,                                   # list of [K_i, 3]
             "pos_xyz":  coord.to(device).float(),        # list of [K_i, 3]
             "num_targets": numTargets.to(device, non_blocking=True), # B,1
@@ -366,6 +375,12 @@ def train_one_epoch(model, loader, optimizer, device, ds_stats, common_params):
 
         total_loss += loss_dict["loss_total"].item() * signal.size(0)
 
+        # print(
+        #     f"loss_cls={loss_dict['loss_cls'].item():.4f} | "
+        #     f"loss_pos={loss_dict['loss_pos'].item():.4f} | "
+        #     f"loss_spectrum={loss_dict['loss_spectrum'].item():.4f} | "
+        # )
+
     return total_loss / len(loader.dataset)
 
 @torch.no_grad()
@@ -373,14 +388,14 @@ def validate(model, loader, device, use_amp, ds_stats, common_params):
     model.eval()
     total_loss = 0.0
 
-    for signal, heatmap, coord, tau, phi, snr, numTargets in loader:
+    for signal, signal_clean, heatmap, coord, tau, phi, snr, numTargets, sample_id in loader:
 
         coord_norm = (coord.float() - ds_stats["coord_mean"]) / ds_stats["coord_sd"]
         coord_norm = coord_norm.to(device, non_blocking=True)
 
-        y_complex = torch.complex(signal[:, 0,:,:].float(), signal[:, 1,:,:].float())  # [B, M, N]
         batch = {
-            "y": y_complex.to(device, non_blocking=True),
+            #"y": signal.to(device, non_blocking=True).float(),  # real [B, 2, M, N]
+            "y": signal_clean.to(device, non_blocking=True).float(),
             "pos_norm": coord_norm,                                   # list of [K_i, 3]
             "pos_xyz":  coord.to(device).float(),        # list of [K_i, 3]
             "num_targets": numTargets.to(device, non_blocking=True), # B,1
@@ -466,13 +481,36 @@ def main():
     # data loader parameters
     batch_size = 32
     num_workers = 4
+
+    print("Available GPUs:", torch.cuda.device_count())
+
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda" if use_cuda else "cpu")
 
+    model = RadarDETR(
+        M=common_params.M,
+        rx_pos=common_params.rx_pos,
+        n_fft=common_params.n_fft,
+        d_model=256,
+        num_queries=8,   # good for Kmax=2 initially
+        top_p=32,
+        num_decoder_layers=3,
+        nhead=8,
+        common_params=common_params,
+    )
+    
+    if torch.cuda.device_count() >= 2:
+        print("Using GPUs 0 and 1")
+        model = DataParallel(
+            model,
+            device_ids=[0, 1],
+            output_device=0,
+        )
+
+    model = model.to(device)
+    
     train_dataset = RadarMatDatasetMT(root_dir="D:\\radar-dataset-multi-targets\\train")
     validation_dataset = RadarMatDatasetMT(root_dir="D:\\radar-dataset-multi-targets\\validation")
-    # train_dataset = RadarMatDatasetMT(root_dir="D:\\temp\\train")
-    # validation_dataset = RadarMatDatasetMT(root_dir="D:\\temp\\validation")
 
     train_loader = DataLoader(
         train_dataset,
@@ -495,34 +533,23 @@ def main():
     # compute data stats
     ds_stats = compute_dataset_stats(train_dataset)
 
-    model = RadarDETR(
-        M=common_params.M,
-        rx_pos=common_params.rx_pos,
-        n_fft=common_params.n_fft,
-        d_model=256,
-        num_queries=8,   # good for Kmax=2 initially
-        top_p=32,
-        num_decoder_layers=3,
-        nhead=8,
-        common_params=common_params,
-    ).to(device)
-
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=1e-4,
+        #lr=1e-4,
+        lr=3e-4,
         weight_decay=1e-4,
     )
 
-    scheduler = ReduceLROnPlateau(
-        optimizer,
-        mode='min',
-        factor=0.5,
-        patience=4,
-        threshold=1e-3,
-        min_lr=1e-6,
-    )
+    # scheduler = ReduceLROnPlateau(
+    #     optimizer,
+    #     mode='min',
+    #     factor=0.5,
+    #     patience=4,
+    #     threshold=1e-3,
+    #     min_lr=1e-6,
+    # )
 
-    epochs = 20
+    epochs = 10
 
     best_val_loss = float("inf")
 
@@ -542,7 +569,7 @@ def main():
                             ds_stats=ds_stats,
                             common_params=common_params)
 
-        scheduler.step(val_loss)
+        #scheduler.step(val_loss)
         current_lr = optimizer.param_groups[0]['lr']
 
         print(
@@ -556,10 +583,12 @@ def main():
         
             best_val_loss = val_loss
 
+            model_to_save = model.module if isinstance(model, DataParallel) else model
+
             torch.save(
                 {
                     "epoch": epoch,
-                    "model_state_dict": model.state_dict(),
+                    "model_state_dict": model_to_save.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "val_loss": val_loss,
                 },
