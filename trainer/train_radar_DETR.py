@@ -13,13 +13,13 @@ import torch
 from model.radar_DETR_v1 import RadarDETR
 from torch.utils.data import DataLoader
 from torch.nn import DataParallel
+from Utils.logger import Logger
 
 
 def radar_detr_loss(
     outputs,
     targets,
     targets_cnt,
-    ds_stats,
     lambda_pos=5.0,
     lambda_obj=1.0,
     no_object_weight=0.1,
@@ -207,7 +207,7 @@ def spectrum_aux_loss(spectrum_logits, spectrum_target, pos_weight=5.0):
 
     return loss
 
-def radar_full_loss(outputs, batch, common_params, ds_stats, lambda_spectrum=1.0):
+def radar_full_loss(outputs, batch, common_params, lambda_spectrum=1.0):
     # DETR target format
     targets = [
         {"pos": p} for p in batch["pos_norm"]
@@ -217,7 +217,7 @@ def radar_full_loss(outputs, batch, common_params, ds_stats, lambda_spectrum=1.0
         {"num_targets": n} for n in batch["num_targets"]
     ]
 
-    loss_detr, loss_dict = radar_detr_loss(outputs, targets, targets_cnt, ds_stats)
+    loss_detr, loss_dict = radar_detr_loss(outputs, targets, targets_cnt)
 
     # Optional spectral auxiliary loss
     # This assumes batch["pos_xyz"] is a list of tensors [K, 3].
@@ -462,7 +462,14 @@ def compute_dataset_stats(dataset):
     return stats
 
 def main():
-    
+
+    # -------------------------
+    # Logger
+    # -------------------------
+    log_file_path = PROJECT_ROOT / "logs" / "train_radar_DETR.log"
+    logger = Logger(log_file=log_file_path, name="train_radar_DETR")
+    logger.info(f"Logging to {log_file_path}")
+
     # parameters
     # common 
     common_params = type('', (), {})()  # empty object to hold parameters
@@ -482,7 +489,7 @@ def main():
     batch_size = 32
     num_workers = 4
 
-    print("Available GPUs:", torch.cuda.device_count())
+    logger.info(f"Available GPUs: {torch.cuda.device_count()}")
 
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda" if use_cuda else "cpu")
@@ -500,7 +507,7 @@ def main():
     )
     
     if torch.cuda.device_count() >= 2:
-        print("Using GPUs 0 and 1")
+        logger.info("Using GPUs 0 and 1")
         model = DataParallel(
             model,
             device_ids=[0, 1],
@@ -572,7 +579,7 @@ def main():
         #scheduler.step(val_loss)
         current_lr = optimizer.param_groups[0]['lr']
 
-        print(
+        logger.info(
             f"Epoch {epoch:03d} | "
             f"train loss: {train_loss:.6f} | "
             f"val loss: {val_loss:.6f} | "
@@ -595,7 +602,7 @@ def main():
                 "best_radar_model.pt",
             )
 
-            print("Saved best model")
+            logger.info("Saved best model")
 
 
 
