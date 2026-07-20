@@ -1,5 +1,7 @@
+import os
 import sys
 from pathlib import Path
+import time
 from xml.parsers.expat import model
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -190,22 +192,57 @@ def build_spectrum_target_from_tau(
 
     return target.unsqueeze(1)  # [B, 1, M, F]
 
-def spectrum_aux_loss(spectrum_logits, spectrum_target, pos_weight=5.0):
+def normalized_spectrum_loss(logits, target, eps=1e-8):
+    pred = torch.sigmoid(logits)
+
+    pred = pred / (pred.sum(dim=-1, keepdim=True) + eps)
+    target = target / (target.sum(dim=-1, keepdim=True) + eps)
+
+    return F.l1_loss(pred, target)
+
+def weighted_spectrum_loss(
+    spectrum_logits,
+    spectrum_target,
+    positive_weight=20.0,
+):
+    weights = 1.0 + positive_weight * spectrum_target
+
+    loss = F.binary_cross_entropy_with_logits(
+        spectrum_logits,
+        spectrum_target,
+        reduction="none",
+    )
+
+    return (weights * loss).mean()
+
+def spectrum_aux_loss(spectrum_logits,
+                    spectrum_target,
+                    pos_weight=5.0,
+                    false_peak_weight=2.0,):
     """
     spectrum_logits: [B, 1, M, F]
     spectrum_target: [B, 1, M, F]
     """
 
-    weight = 1.0 + pos_weight * spectrum_target
-
-    loss = F.binary_cross_entropy_with_logits(
+    bce = F.binary_cross_entropy_with_logits(
         spectrum_logits,
         spectrum_target,
-        weight=weight,
-        reduction="mean",
+        reduction="none",
     )
 
-    return loss
+    positive_region = spectrum_target
+    background_region = 1.0 - spectrum_target
+
+    positive_loss = (positive_region * bce).sum()
+    positive_norm = positive_region.sum().clamp_min(1.0)
+
+    background_loss = (background_region * bce).sum()
+    background_norm = background_region.sum().clamp_min(1.0)
+
+    return (
+        pos_weight * positive_loss / positive_norm
+        + false_peak_weight * background_loss / background_norm
+    )
 
 def radar_full_loss(outputs, batch, common_params, lambda_spectrum=1.0):
     # DETR target format
@@ -358,8 +395,8 @@ def train_one_epoch(model, loader, optimizer, device, ds_stats, common_params):
         coord_norm = coord_norm.to(device, non_blocking=True)
 
         batch = {
-            #"y": signal.to(device, non_blocking=True).float(),  # real [B, 2, M, N]
-            "y": signal_clean.to(device, non_blocking=True).float(),
+            "y": signal.to(device, non_blocking=True).float(),  # real [B, 2, M, N]
+            #"y": signal_clean.to(device, non_blocking=True).float(),
             "pos_norm": coord_norm,                                   # list of [K_i, 3]
             "pos_xyz":  coord.to(device).float(),        # list of [K_i, 3]
             "num_targets": numTargets.to(device, non_blocking=True), # B,1
@@ -375,11 +412,11 @@ def train_one_epoch(model, loader, optimizer, device, ds_stats, common_params):
 
         total_loss += loss_dict["loss_total"].item() * signal.size(0)
 
-        # print(
-        #     f"loss_cls={loss_dict['loss_cls'].item():.4f} | "
-        #     f"loss_pos={loss_dict['loss_pos'].item():.4f} | "
-        #     f"loss_spectrum={loss_dict['loss_spectrum'].item():.4f} | "
-        # )
+    print(
+        f"loss_cls={loss_dict['loss_cls'].item():.4f} | "
+        f"loss_pos={loss_dict['loss_pos'].item():.4f} | "
+        f"loss_spectrum={loss_dict['loss_spectrum'].item():.4f} | "
+    )
 
     return total_loss / len(loader.dataset)
 
@@ -394,8 +431,8 @@ def validate(model, loader, device, use_amp, ds_stats, common_params):
         coord_norm = coord_norm.to(device, non_blocking=True)
 
         batch = {
-            #"y": signal.to(device, non_blocking=True).float(),  # real [B, 2, M, N]
-            "y": signal_clean.to(device, non_blocking=True).float(),
+            "y": signal.to(device, non_blocking=True).float(),  # real [B, 2, M, N]
+            #"y": signal_clean.to(device, non_blocking=True).float(),
             "pos_norm": coord_norm,                                   # list of [K_i, 3]
             "pos_xyz":  coord.to(device).float(),        # list of [K_i, 3]
             "num_targets": numTargets.to(device, non_blocking=True), # B,1
@@ -466,7 +503,7 @@ def main():
     # -------------------------
     # Logger
     # -------------------------
-    log_file_path = PROJECT_ROOT / "logs" / "train_radar_DETR.log"
+    log_file_path = PROJECT_ROOT / "logs" / f"train_radar_DETR{time.strftime('%Y%m%d_%H%M%S')}.log"
     logger = Logger(log_file=log_file_path, name="train_radar_DETR")
     logger.info(f"Logging to {log_file_path}")
 
@@ -505,7 +542,22 @@ def main():
         nhead=8,
         common_params=common_params,
     )
-    
+
+    pre_trained_ckpt = "DETR_v1_clean.pt"
+    if os.path.exists(pre_trained_ckpt):
+        ckpt = torch.load(pre_trained_ckpt, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"])
+        logger.info(f"Loaded pre-trained weights from {pre_trained_ckpt}")
+
+    print(
+        f"Loaded clean checkpoint from epoch "
+        f"{ckpt.get('epoch', 'unknown')}"
+    )
+    print(
+        f"Clean validation loss: "
+        f"{ckpt.get('val_loss', 'unknown')}"
+    )
+
     if torch.cuda.device_count() >= 2:
         logger.info("Using GPUs 0 and 1")
         model = DataParallel(
@@ -516,8 +568,11 @@ def main():
 
     model = model.to(device)
     
-    train_dataset = RadarMatDatasetMT(root_dir="D:\\radar-dataset-multi-targets\\train")
-    validation_dataset = RadarMatDatasetMT(root_dir="D:\\radar-dataset-multi-targets\\validation")
+    # train_dataset = RadarMatDatasetMT(root_dir="D:\\radar-dataset-multi-targets\\train", add_noise=True)
+    # validation_dataset = RadarMatDatasetMT(root_dir="D:\\radar-dataset-multi-targets\\validation", add_noise=True)
+
+    train_dataset = RadarMatDatasetMT(root_dir="D:\\radar-dataset-multi-targets\\train", add_noise=True)
+    validation_dataset = RadarMatDatasetMT(root_dir="D:\\radar-dataset-multi-targets\\validation", add_noise=True)
 
     train_loader = DataLoader(
         train_dataset,
@@ -542,23 +597,26 @@ def main():
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        #lr=1e-4,
-        lr=3e-4,
+        lr=1e-4,
+        #lr=3e-4,
         weight_decay=1e-4,
     )
 
-    # scheduler = ReduceLROnPlateau(
-    #     optimizer,
-    #     mode='min',
-    #     factor=0.5,
-    #     patience=4,
-    #     threshold=1e-3,
-    #     min_lr=1e-6,
-    # )
+    scheduler = ReduceLROnPlateau(
+        optimizer,
+        mode='min',
+        factor=0.5,
+        patience=4,
+        threshold=1e-3,
+        min_lr=1e-6,
+    )
 
-    epochs = 10
+    epochs = 25
 
     best_val_loss = float("inf")
+
+    patience = 5
+    epochs_no_improve = 0
 
     for epoch in range(1, epochs + 1):
 
@@ -576,7 +634,7 @@ def main():
                             ds_stats=ds_stats,
                             common_params=common_params)
 
-        #scheduler.step(val_loss)
+        scheduler.step(val_loss)
         current_lr = optimizer.param_groups[0]['lr']
 
         logger.info(
@@ -589,6 +647,7 @@ def main():
         if val_loss < best_val_loss:
         
             best_val_loss = val_loss
+            epochs_no_improve = 0
 
             model_to_save = model.module if isinstance(model, DataParallel) else model
 
@@ -603,8 +662,12 @@ def main():
             )
 
             logger.info("Saved best model")
-
-
+        else:
+            epochs_no_improve += 1
+        
+        if epochs_no_improve >= patience:
+            logger.info(f"Early stopping after {epoch} epochs")
+            break
 
 if __name__ == "__main__":
     main()

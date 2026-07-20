@@ -54,8 +54,8 @@ class RadarMatDatasetMT(Dataset):
 		snr_tensor = _to_scalar_tensor(snr)
 
 		if self.add_noise:
-			snr_tensor = torch.empty(1).uniform_(-5.0, 20.0).squeeze()
-			signal = _add_noise(signal, snr_tensor)
+			snr_tensor = torch.empty(1).uniform_(5, 30).squeeze()
+			signal = _add_noise(signal_clean, snr_tensor)
 
 		return signal, signal_clean, heatmap, coord, tau, phi, snr_tensor, num_targets, sample_id
         

@@ -59,7 +59,10 @@ def main():
 
     # ── Dataset ──────────────────────────────────────────────
     train_dataset = RadarMatDatasetMT(root_dir="D:\\radar-dataset-multi-targets\\train")
-    test_dataset   = RadarMatDatasetMT(root_dir="D:\\radar-dataset-multi-targets\\test")
+    test_dataset   = RadarMatDatasetMT(root_dir="D:\\radar-dataset-multi-targets\\test", add_noise=True)
+
+    # train_dataset = RadarMatDatasetMT(root_dir="D:\\one-example\\train")
+    # test_dataset   = RadarMatDatasetMT(root_dir="D:\\one-example\\test", add_noise=False)
 
     train_loader = DataLoader(
         train_dataset, batch_size=32, shuffle=True,
@@ -85,7 +88,7 @@ def main():
         common_params=common_params
     ).to(device)
 
-    ckpt = torch.load("DETR_v1.pt",  map_location=device, weights_only=True)
+    ckpt = torch.load("best_radar_model.pt",  map_location=device, weights_only=True)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 
@@ -96,21 +99,21 @@ def main():
         
         #y_complex = torch.complex(signal[:, 0,:,:].float(), signal[:, 1,:,:].float())  # [B, M, N]
         with torch.no_grad():
-            outputs = model(signal_clean.to(device, non_blocking=True).float())
+            outputs = model(signal.to(device, non_blocking=True).float())
 
         locations = outputs["pos"]
         prob = outputs["logits"]
 
         # locations_un_norm = locations * ds_stats["coord_sd"].to(device) + ds_stats["coord_mean"].to(device)  # [B, Q, 2]
         coord_norm = (coord.float() - ds_stats["coord_mean"]) / ds_stats["coord_sd"]
-        #coord_norm = coord_norm.to(device, non_blocking=True)
-        # batch = {
-        #     "y": signal.to(device, non_blocking=True).float(),
-        #     "pos_norm": coord_norm,                                   # list of [K_i, 3]
-        #     "pos_xyz":  coord.to(device).float(),        # list of [K_i, 3]
-        #     "num_targets": numTargets.to(device, non_blocking=True), # B,1
-        # }
-        # loss = radar_full_loss(outputs, batch, common_params, ds_stats)
+        coord_norm = coord_norm.to(device, non_blocking=True)
+        batch = {
+            "y": signal.to(device, non_blocking=True).float(),
+            "pos_norm": coord_norm,                                   # list of [K_i, 3]
+            "pos_xyz":  coord.to(device).float(),        # list of [K_i, 3]
+            "num_targets": numTargets.to(device, non_blocking=True), # B,1
+        }
+        loss = radar_full_loss(outputs, batch, common_params)
 
         all_dets = []
 
