@@ -1,19 +1,33 @@
-function [y_clean, y_ell, tau_all, phi_all] = get_radar_response_noisy(targets, alfa, SNR_dB, maxTargets, K)
+function [y_clean, y_ell, tau_all, phi_all] = get_radar_response_noisy(targets, alfa, SNR_dB, maxTargets, K, is_1km)
 
+% common
 c = 3e8; % light speed [m/S]
 fc = 2e9; % center freq [Hz]
 BW = 0.2e9; % Band width [Hz]
+M = 40; % Number of receivers
+
+if is_1km
+Tc = 30e-6; % Chip length [sec]
+a = BW / Tc;
+Fs = 110e6; % sampling freq [Hz]
+Ts = 1 / Fs; % sampling period
+N = round(Tc * Fs); % number of samples
+n = 0 : N-1;
+R = 1000;
+else
+
 Tc = 20e-6; % Chip length [sec]
 a = BW / Tc;
-M = 40; % Number of receivers
 Fs = 50e6; % sampling freq [Hz]
 Ts = 1 / Fs; % sampling period
 N = round(Tc * Fs); % number of samples
 n = 0 : N-1;
+R = 100;
+end
 
 P_trnsmt = zeros(3,1); % Transmitter location [x;y;z] [meters]
 theta = 2 * pi * (0 : M-1)./M; % radians
-q = 100*[cos(theta); sin(theta); zeros(size(theta)) ]; % antenna locations [meters
+q = R*[cos(theta); sin(theta); zeros(size(theta)) ]; % antenna locations [meters]
 
 [y_total, tau_all, phi_all] = deal(0, zeros(M,maxTargets), zeros(M,maxTargets));
 
@@ -50,6 +64,7 @@ y_ell = y_ell + noise;
         t = Ts * n;
         win = (t >= tau.') & (t <= Tc);
         y_ell = y_ell .* win;
+        y_ell = y_ell(:,N-999:end);
     end
 end
 

@@ -217,6 +217,9 @@ def _to_numpy_array(data: Any) -> np.ndarray:
 def _to_signal_tensor(signal: Any) -> torch.Tensor:
 	arr = np.asarray(signal)
 
+	if arr.ndim == 1:
+		return torch.empty(0, dtype=torch.float32)
+
 	if np.iscomplexobj(arr):
 		arr = np.stack([arr.real, arr.imag], axis=0)
 	elif arr.ndim == 3 and arr.shape[0] == 2:

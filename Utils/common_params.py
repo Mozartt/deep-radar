@@ -7,6 +7,9 @@ def getCommonParams():
     common_params.M = 40
     common_params.n_fft = 1024
     common_params.rx_radius = 100 # m
+    common_params.fc = 2e9
+    common_params.Tc = 20e-6
+    common_params.c = 3e8
     theta = 2 * torch.pi * torch.arange(common_params.M, dtype=torch.float32) / common_params.M
     rx_pos_tensor = torch.stack([torch.cos(theta), torch.sin(theta), torch.zeros(common_params.M)], dim=1) * common_params.rx_radius
 
