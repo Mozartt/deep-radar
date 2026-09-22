@@ -1,33 +1,18 @@
-function [y_clean, y_ell, tau_all, phi_all] = get_radar_response_noisy(targets, alfa, SNR_dB, maxTargets, K, is_1km)
+function [y_clean, y_ell, tau_all, phi_all] = get_radar_response_noisy(targets, alfa, SNR_dB, maxTargets, K, tran_config)
 
 % common
-c = 3e8; % light speed [m/S]
-fc = 2e9; % center freq [Hz]
-BW = 0.2e9; % Band width [Hz]
-M = 40; % Number of receivers
+c = tran_config.c; % light speed [m/S]
+fc = tran_config.fc;
+M = tran_config.M; % Number of receivers
+Tc = tran_config.Tc; % Chip length [sec]
+a = tran_config.a;
+Ts = tran_config.Ts; % sampling period
+N = tran_config.N; % number of samples
+n = tran_config.n;
 
-if is_1km
-Tc = 30e-6; % Chip length [sec]
-a = BW / Tc;
-Fs = 110e6; % sampling freq [Hz]
-Ts = 1 / Fs; % sampling period
-N = round(Tc * Fs); % number of samples
-n = 0 : N-1;
-R = 1000;
-else
 
-Tc = 20e-6; % Chip length [sec]
-a = BW / Tc;
-Fs = 50e6; % sampling freq [Hz]
-Ts = 1 / Fs; % sampling period
-N = round(Tc * Fs); % number of samples
-n = 0 : N-1;
-R = 100;
-end
-
-P_trnsmt = zeros(3,1); % Transmitter location [x;y;z] [meters]
-theta = 2 * pi * (0 : M-1)./M; % radians
-q = R*[cos(theta); sin(theta); zeros(size(theta)) ]; % antenna locations [meters]
+P_trnsmt = tran_config.p_trnsmt; % Transmitter location [x;y;z] [meters]
+q = tran_config.q; % antenna locations [meters]
 
 [y_total, tau_all, phi_all] = deal(0, zeros(M,maxTargets), zeros(M,maxTargets));
 

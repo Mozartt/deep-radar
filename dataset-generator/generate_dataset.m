@@ -5,27 +5,41 @@ close all;
 addpath("../simulator/")
 
 %% =========================================================
-% Dataset generation for radar heatmap learning
-%
-% Assumes you already implemented:
-%
-%   heatmap = get_heatmap(p_target, alpha, SNR)
+% Dataset generation for radar localization
 %
 % INPUT:
-%   p_target : [x;y;z]
 %   alpha    : target amplitude
 %   SNR      : SNR in dB
 %
 % OUTPUT:
-%   heatmap  : 2D matrix
+%   
 %
 %% =========================================================
+%% -------------------------------
+% Transmission parameters
+%% -------------------------------
+tran_config.c = 3e8; % light speed [m/S]
+tran_config.fc = 2e9; % center freq [Hz]
+tran_config.BW = 0.2e9; % Band width [Hz]
+tran_config.M = 40; % Number of receivers
+tran_config.Tc = 20e-6; % Chip length [sec]
+tran_config.a = tran_config.BW / tran_config.Tc;
+tran_config.Fs = 50e6; % sampling freq [Hz]
+tran_config.Ts = 1 / tran_config.Fs; % sampling period
+tran_config.N = round(tran_config.Tc * tran_config.Fs); % number of samples
+tran_config.n = 0 : tran_config.N-1;
+tran_config.recievers_circle_radius = 100; % receivers are ordered in a circle
+tran_config.p_trnsmt = zeros(3,1); % Transmitter location [x;y;z] [meters]
+
+theta = 2 * pi * (0 : tran_config.M-1)./tran_config.M; % radians
+R = tran_config.recievers_circle_radius;
+tran_config.q = R*[cos(theta); sin(theta); zeros(size(theta)) ]; % antenna locations [meters]
 
 %% -------------------------------
 % Dataset parameters
 %% -------------------------------
 
-numSamples = 400000;
+numSamples = 80000;
 numOfTargets = 4; % number of targets per sample
 
 % Signal parameters
@@ -33,7 +47,7 @@ alphaRange = [1, 1];
 snrRange   = [-5, 20]; %dB
 
 % Output folder
-datasetDir = "D:\radar-dataset-multi-targets-1km\";
+datasetDir = "D:\radar-dataset-multi-targets-2\";
 
 testDir  = fullfile(datasetDir, 'test');
 valDir   = fullfile(datasetDir, 'validation');
@@ -68,7 +82,7 @@ snrVec    = zeros(numSamples, 1);
 %% -------------------------------
 
 fprintf('Generating dataset...\n');
-radius = 1500;
+radius = 150;
 zRange = [200 300];
 
 for i = 1:numSamples
@@ -76,7 +90,7 @@ for i = 1:numSamples
     %% ---------------------------------
     % Random target location
     %% ---------------------------------
-    [targets, K] = sample_targets_by_quadrants(0, radius, zRange(1), zRange(2), numOfTargets);
+    [targets, K] = sample_targets_simple(0, radius, zRange(1), zRange(2), numOfTargets);
     
     %% ---------------------------------
     % Random radar conditions
@@ -89,19 +103,18 @@ for i = 1:numSamples
     % Generate heatmap
     %% ---------------------------------
 
-    [y_clean, y_ell, tau, phi] = get_radar_response_noisy(targets, alpha, SNR, size(targets,1), K, true);
+    [y_clean, y_ell, tau, phi] = get_radar_response_noisy(targets, alpha, SNR, size(targets,1), K, tran_config);
 
     %% ---------------------------------
-    % Zero out tensor i don't need in the dataset
+    % Normalize heatmap
     %% ---------------------------------
 
     heatmap = [];
-    y_ell = [];
 
     %% ---------------------------------
     % Save sample
     %% ---------------------------------
-    
+
     sample = struct( ...
         'y_clean', single(y_clean), ...
         'y_ell', single(y_ell), ...

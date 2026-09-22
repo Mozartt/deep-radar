@@ -58,8 +58,8 @@ def main():
     print(f"Using {gpu_label}")
 
     # ── Dataset ──────────────────────────────────────────────
-    train_dataset = RadarMatDatasetMT(root_dir="D:\\radar-dataset-multi-targets\\train")
-    test_dataset   = RadarMatDatasetMT(root_dir="D:\\radar-dataset-multi-targets\\test", add_noise=True)
+    train_dataset = RadarMatDatasetMT(root_dir="D:\\radar-dataset-multi-targets-2\\train")
+    test_dataset   = RadarMatDatasetMT(root_dir="D:\\radar-dataset-multi-targets-2\\test", add_noise=True)
 
     # train_dataset = RadarMatDatasetMT(root_dir="D:\\one-example\\train")
     # test_dataset   = RadarMatDatasetMT(root_dir="D:\\one-example\\test", add_noise=False)
@@ -185,6 +185,14 @@ def main():
     # print("Median error:", errors_tensor.median().item())
     # print("90th percentile:", torch.quantile(errors_tensor, 0.9).item())
     # print("Maximum error:", errors_tensor.max().item())
+    print("RMSE", torch.sqrt(torch.mean(errors_tensor**2)).item())
+
+    plt.figure()
+    plt.hist(errors_tensor.numpy(), bins=50)
+    plt.xlabel("Error (m)")
+    plt.ylabel("Count")
+    plt.title("Localization Error Distribution")
+    plt.show()
 
 if __name__ == "__main__": 
     main()

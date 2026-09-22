@@ -20,12 +20,31 @@ addpath("../simulator/")
 %   heatmap  : 2D matrix
 %
 %% =========================================================
+%% -------------------------------
+% Transmission parameters
+%% -------------------------------
+tran_config.c = 3e8; % light speed [m/S]
+tran_config.fc = 2e9; % center freq [Hz]
+tran_config.BW = 0.2e9; % Band width [Hz]
+tran_config.M = 40; % Number of receivers
+tran_config.Tc = 30e-6; % Chip length [sec]
+tran_config.a = BW / Tc;
+tran_config.Fs = 110e6; % sampling freq [Hz]
+tran_config.Ts = 1 / Fs; % sampling period
+tran_config.N = round(Tc * Fs); % number of samples
+tran_config.n = 0 : N-1;
+tran_config.recievers_circle_radius = 1000;
+tran_config.p_trnsmt = zeros(3,1); % Transmitter location [x;y;z] [meters]
+
+theta = 2 * pi * (0 : M-1)./M; % radians
+R = recievers_circle_radius;
+tran_config.q = R*[cos(theta); sin(theta); zeros(size(theta)) ]; % antenna locations [meters]
 
 %% -------------------------------
 % Dataset parameters
 %% -------------------------------
 
-numSamples = 80000;
+numSamples = 400000;
 numOfTargets = 4; % number of targets per sample
 
 % Signal parameters
@@ -33,7 +52,7 @@ alphaRange = [1, 1];
 snrRange   = [-5, 20]; %dB
 
 % Output folder
-datasetDir = "D:\radar-dataset-multi-targets\";
+datasetDir = "D:\radar-dataset-multi-targets-1km\";
 
 testDir  = fullfile(datasetDir, 'test');
 valDir   = fullfile(datasetDir, 'validation');
@@ -68,7 +87,7 @@ snrVec    = zeros(numSamples, 1);
 %% -------------------------------
 
 fprintf('Generating dataset...\n');
-radius = 150;
+radius = 1500;
 zRange = [200 300];
 
 for i = 1:numSamples
@@ -89,18 +108,19 @@ for i = 1:numSamples
     % Generate heatmap
     %% ---------------------------------
 
-    [y_clean, y_ell, tau, phi] = get_radar_response_noisy(targets, alpha, SNR, size(targets,1), K);
+    [y_clean, y_ell, tau, phi] = get_radar_response_noisy(targets, alpha, SNR, size(targets,1), K, true, tran_config);
 
     %% ---------------------------------
-    % Normalize heatmap
+    % Zero out tensor i don't need in the dataset
     %% ---------------------------------
 
     heatmap = [];
+    y_ell = [];
 
     %% ---------------------------------
     % Save sample
     %% ---------------------------------
-
+    
     sample = struct( ...
         'y_clean', single(y_clean), ...
         'y_ell', single(y_ell), ...
