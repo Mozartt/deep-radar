@@ -103,7 +103,7 @@ for i = 1:numSamples
     % Generate heatmap
     %% ---------------------------------
 
-    [y_clean, y_ell, tau, phi] = get_radar_response_noisy(targets, alpha, SNR, size(targets,1), K, tran_config);
+    [y_clean, y_ell, tau, phi] = get_radar_response_noisy(targets, alpha, SNR, numOfTargets, K, tran_config);
 
     %% ---------------------------------
     % Normalize heatmap

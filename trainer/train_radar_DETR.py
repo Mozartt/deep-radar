@@ -460,7 +460,7 @@ def compute_dataset_stats(dataset):
     loader = DataLoader(dataset, batch_size=512, shuffle=False, num_workers=4)
     all_tau = []
     all_coord = []
-    for signal, heatmap, coord, tau, phi, snr, numTargets in loader:
+    for signal, signal_clean, heatmap, coord, tau, phi, snr, numTargets, sample_id in loader:
         all_tau.append(tau.float())
         all_coord.append(coord)  # list of [K_i, 3] tensors
 
@@ -543,20 +543,20 @@ def main():
         common_params=common_params,
     )
 
-    pre_trained_ckpt = "DETR_v1_clean.pt"
+    pre_trained_ckpt = "DETR_v1_clean_100m.pt"
     if os.path.exists(pre_trained_ckpt):
         ckpt = torch.load(pre_trained_ckpt, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model_state_dict"])
         logger.info(f"Loaded pre-trained weights from {pre_trained_ckpt}")
 
-    print(
-        f"Loaded clean checkpoint from epoch "
-        f"{ckpt.get('epoch', 'unknown')}"
-    )
-    print(
-        f"Clean validation loss: "
-        f"{ckpt.get('val_loss', 'unknown')}"
-    )
+        print(
+            f"Loaded clean checkpoint from epoch "
+            f"{ckpt.get('epoch', 'unknown')}"
+        )
+        print(
+            f"Clean validation loss: "
+            f"{ckpt.get('val_loss', 'unknown')}"
+        )
 
     if torch.cuda.device_count() >= 2:
         logger.info("Using GPUs 0 and 1")
@@ -568,11 +568,8 @@ def main():
 
     model = model.to(device)
     
-    # train_dataset = RadarMatDatasetMT(root_dir="D:\\radar-dataset-multi-targets\\train", add_noise=True)
-    # validation_dataset = RadarMatDatasetMT(root_dir="D:\\radar-dataset-multi-targets\\validation", add_noise=True)
-
-    train_dataset = RadarMatDatasetMT(root_dir="D:\\radar-dataset-multi-targets\\train", add_noise=True)
-    validation_dataset = RadarMatDatasetMT(root_dir="D:\\radar-dataset-multi-targets\\validation", add_noise=True)
+    train_dataset = RadarMatDatasetMT(root_dir="D:\\radar-dataset-multi-targets-2\\train", add_noise=True)
+    validation_dataset = RadarMatDatasetMT(root_dir="D:\\radar-dataset-multi-targets-2\\validation", add_noise=True)
 
     train_loader = DataLoader(
         train_dataset,
@@ -611,7 +608,7 @@ def main():
         min_lr=1e-6,
     )
 
-    epochs = 25
+    epochs = 10
 
     best_val_loss = float("inf")
 
