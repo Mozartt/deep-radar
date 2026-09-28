@@ -1,4 +1,4 @@
-function [y_ell, tau, phi] = get_radar_response(P_trgt, alfa, tran_config)
+function [y_ell, tau, phi] = get_radar_response(P_trgt, tran_config)
 
 % common
 c = tran_config.c; % light speed [m/S]
@@ -9,6 +9,7 @@ a = tran_config.a;
 Ts = tran_config.Ts; % sampling period
 N = tran_config.N; % number of samples
 n = tran_config.n;
+alfa = tran_config.alfa;
 
 P_trnsmt = tran_config.p_trnsmt; % Transmitter location [x;y;z] [meters]
 q = tran_config.q; % antenna locations [meters]
@@ -21,10 +22,10 @@ function [y_ell, tau, phi] = Radar_Response(P_trnsmt,q,P_trgt,fc,a,Ts,n,c)
     beta = exp( - 1i * 2 * pi * fc * tau).*exp( 1i * pi * a * tau.^2);
     phi = angle(beta);
     y_ell = diag(beta) * exp( - 1i * 2 * pi * a * tau' * Ts * n); % observed data
-    t = Ts * n;
-    win = (t >= tau.') & (t <= Tc);
-    y_ell = y_ell .* win;
-    y_ell = y_ell(:,N-999:end);
+    %t = Ts * n;
+    %win = (t >= tau.') & (t <= Tc);
+    %y_ell = y_ell .* win;
+    %y_ell = y_ell(:,N-999:end);
 end
 end
 

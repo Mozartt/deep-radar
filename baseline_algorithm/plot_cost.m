@@ -1,4 +1,5 @@
 clear, clc, close all
+addpath("Simulator/")
 
 %% -------------------------------
 % Transmission parameters
@@ -8,6 +9,7 @@ tran_config.fc = 2e9; % center freq [Hz]
 tran_config.BW = 0.2e9; % Band width [Hz]
 tran_config.M = 40; % Number of receivers
 tran_config.Tc = 20e-6; % Chip length [sec]
+tran_config.alfa = 1; % attenuation
 tran_config.a = tran_config.BW / tran_config.Tc;
 tran_config.Fs = 50e6; % sampling freq [Hz]
 tran_config.Ts = 1 / tran_config.Fs; % sampling period
@@ -24,10 +26,10 @@ P_trnsmt = zeros(3,1); % Transmitter location [x;y;z] [meters]
 P_trgt = [200; 300; 500]; % Target location
 
 % tau = c*norm(P_trgt - P_trnsmt) + c*vecnorm(q - P_trgt); % propagation time
-alfa = 1; % attenuation
+
 SNR=30;
 K=1;
-[y_ell, tau, phi] = get_radar_response(P_trgt,alfa, tran_config);
+[y_ell, tau, phi] = get_radar_response(P_trgt, tran_config);
 
 %% area of Interset
 X1 = (-10:0.05:10) + P_trgt(1);
@@ -51,7 +53,7 @@ for Px = X1
             % tau_hat = c*norm(P_hat - P_trnsmt) + c*vecnorm(q - P_hat); % propagation time
             % beta_hat = exp(-1i * 2 * pi * fc * tau_hat).*exp( 1i * pi * a * tau_hat.^2);
             % XX = diag(beta_hat) * exp( - 1i * 2 * pi * a * tau_hat' * Ts * n);
-            [XX, tau, phi] = get_radar_response(P_hat, alfa, tran_config);
+            [XX, tau, phi] = get_radar_response(P_hat, tran_config);
             g = abs( sum( sum( conj(XX) .* y_ell ) ) );
             RESULT(jy,jx,jz) =  g;
         end
