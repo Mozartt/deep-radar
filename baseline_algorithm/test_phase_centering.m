@@ -20,7 +20,7 @@ tran_config.N = round(tran_config.Tc * tran_config.Fs); % number of samples
 tran_config.n = 0 : tran_config.N-1;
 tran_config.recievers_circle_radius = 100; % receivers are ordered in a circle
 tran_config.p_trnsmt = zeros(3,1); % Transmitter location [x;y;z] [meters]
-
+tran_config.alfa = 1;
 theta = 2 * pi * (0 : tran_config.M-1)./tran_config.M; % radians
 R = tran_config.recievers_circle_radius;
 tran_config.q = R*[cos(theta); sin(theta); zeros(size(theta)) ]; % antenna locations [meters]
@@ -32,7 +32,7 @@ P_trgt = [200; 300; 500]; % Target location
 alfa = 1; % attenuation
 SNR=30;
 K=1;
-[y_ell, tau, phi] = get_radar_response(P_trgt,alfa, tran_config);
+[y_ell, tau, phi] = get_radar_response(P_trgt, tran_config);
 
 %% m,n sub domain 
 m_idx = 1:10;
@@ -61,7 +61,7 @@ for Px = X1
             % tau_hat = c*norm(P_hat - P_trnsmt) + c*vecnorm(q - P_hat); % propagation time
             % beta_hat = exp(-1i * 2 * pi * fc * tau_hat).*exp( 1i * pi * a * tau_hat.^2);
             % XX = diag(beta_hat) * exp( - 1i * 2 * pi * a * tau_hat' * Ts * n);
-            [XX, tau, phi] = get_radar_response(P_hat, alfa, tran_config);
+            [XX, tau, phi] = get_radar_response(P_hat, tran_config);
 
             XX = XX(m_idx, n_idx);
             g = sum(sum(conj(XX) .* y_ell));

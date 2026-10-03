@@ -11,6 +11,7 @@ tran_config.Tc = 20e-6; % Chip length [sec]
 tran_config.a = tran_config.BW / tran_config.Tc;
 tran_config.Fs = 50e6; % sampling freq [Hz]
 tran_config.Ts = 1 / tran_config.Fs; % sampling period
+tran_config.alfa = 1;
 tran_config.N = round(tran_config.Tc * tran_config.Fs); % number of samples
 tran_config.n = 0 : tran_config.N-1;
 tran_config.recievers_circle_radius = 100; % receivers are ordered in a circle
@@ -48,7 +49,7 @@ for Px = Xfine
             % tau_hat = c*norm(P_hat - P_trnsmt) + c*vecnorm(q - P_hat); % propagation time
             % beta_hat = exp(-1i * 2 * pi * fc * tau_hat).*exp( 1i * pi * a * tau_hat.^2);
             % XX = diag(beta_hat) * exp( - 1i * 2 * pi * a * tau_hat' * Ts * n);
-            [XX, tau, phi] = get_radar_response(P_hat, alfa, tran_config);
+            [XX, tau, phi] = get_radar_response(P_hat, tran_config);
 
             XX = XX(m_idx, n_idx);
             g = sum(sum(conj(XX) .* y_ell));
