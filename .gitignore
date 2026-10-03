@@ -10,3 +10,5 @@ saved-models/
 *.pt
 
 *.png
+
+*.log

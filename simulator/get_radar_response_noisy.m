@@ -1,25 +1,31 @@
-function [y_ell, tau, phi] = get_radar_response(P_trgt, alfa, SNR_dB)
+function [y_clean, y_ell, tau_all, phi_all] = get_radar_response_noisy(targets, alfa, SNR_dB, maxTargets, K, tran_config)
 
-c = 3e8; % light speed [m/S]
-fc = 2e9; % center freq [Hz]
-BW = 0.2e9; % Band width [Hz]
-Tc = 20e-6; % Chip length [sec]
-a = BW / Tc;
-M = 40; % Number of receivers
-Fs = 50e6; % sampling freq [Hz]
-Ts = 1 / Fs; % sampling period
-N = round(Tc * Fs); % number of samples
-n = 0 : N-1;
+% common
+c = tran_config.c; % light speed [m/S]
+fc = tran_config.fc;
+M = tran_config.M; % Number of receivers
+Tc = tran_config.Tc; % Chip length [sec]
+a = tran_config.a;
+Ts = tran_config.Ts; % sampling period
+N = tran_config.N; % number of samples
+n = tran_config.n;
 
-P_trnsmt = zeros(3,1); % Transmitter location [x;y;z] [meters]
-theta = 2 * pi * (0 : M-1)./M; % radians
-q = 100*[cos(theta); sin(theta); zeros(size(theta)) ]; % antenna locations [meters
 
-% tau = c*norm(P_trgt - P_trnsmt) + c*vecnorm(q - P_trgt); % propagation time
-% beta = exp( - 1i * 2 * pi * fc * tau).*exp( 1i * pi * a * tau.^2);
-% y_ell = alfa * diag(beta) * exp( - 1i * 2 * pi * a * tau' * Ts * n); % observed data
-[y_ell, tau, phi] = Radar_Response(P_trnsmt,q,P_trgt,fc,a,Ts,n,c,Tc);
-y_ell = alfa * y_ell;
+P_trnsmt = tran_config.p_trnsmt; % Transmitter location [x;y;z] [meters]
+q = tran_config.q; % antenna locations [meters]
+
+[y_total, tau_all, phi_all] = deal(0, zeros(M,maxTargets), zeros(M,maxTargets));
+
+for k = 1:K
+    P_trgt = targets(k, :).'; % Target location [x;y;z] [meters]
+    [y_ell, tau, phi] = Radar_Response(P_trnsmt,q,P_trgt,fc,a,Ts,n,c,Tc);
+    y_ell = alfa * y_ell;
+    y_total = y_total + y_ell;
+    tau_all(:, k) = tau;
+    phi_all(:, k) = phi;
+end
+
+y_clean = y_total;
 
 % Signal power
 %signal_power = mean(abs(y_ell(:)).^2);
@@ -43,6 +49,7 @@ y_ell = y_ell + noise;
         t = Ts * n;
         win = (t >= tau.') & (t <= Tc);
         y_ell = y_ell .* win;
+        y_ell = y_ell(:,N-999:end);
     end
 end
 

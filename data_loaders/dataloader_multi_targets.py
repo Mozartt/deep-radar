@@ -9,6 +9,7 @@ from torch.utils.data import Dataset
 
 
 loadmat = None
+MAX_TARGETS = 4  # maximum number of targets per sample
 
 try:
 	import h5py
@@ -16,7 +17,7 @@ except ImportError:  # pragma: no cover
 	h5py = None
 
 
-class RadarMatDataset(Dataset):
+class RadarMatDatasetMT(Dataset):
 	"""PyTorch dataset for MATLAB samples saved as sample_XXXXXX.mat files."""
 
 	def __init__(self, root_dir: str, pattern: str = "sample_*.mat", add_noise: bool = False):
@@ -38,9 +39,10 @@ class RadarMatDataset(Dataset):
 		signal = _to_signal_tensor(sample["y_ell"])
 		signal_clean = _to_signal_tensor(sample["y_clean"])
 		heatmap = _to_heatmap_tensor(sample["heatmap"])
-		coord = _to_coord_tensor(sample["target_xyz"])
-		tau = _to_tau_tensor(sample["tau"])
-		phi = _to_tau_tensor(sample["phi"])
+		coord = _to_coord_tensor(sample["target_xyz"])        # [MAX_TARGETS, 3]
+		tau = _to_tau_tensor(sample["tau"])                   # [M, MAX_TARGETS]
+		phi = _to_tau_tensor(sample["phi"])                   # [M, MAX_TARGETS]
+		num_targets = _to_num_targets_tensor(sample["num_targets"])  # scalar long
 		sample_id = _to_sample_id_tensor(sample["sample_id"])
 		snr = sample.get("SNR", sample.get("snr"))
 		if snr is None:
@@ -52,10 +54,10 @@ class RadarMatDataset(Dataset):
 		snr_tensor = _to_scalar_tensor(snr)
 
 		if self.add_noise:
-			snr_tensor = torch.empty(1).uniform_(-5.0, 20.0).squeeze()
-			signal = _add_noise(signal, snr_tensor)
+			snr_tensor = torch.empty(1).uniform_(5, 30).squeeze()
+			signal = _add_noise(signal_clean, snr_tensor)
 
-		return signal, signal_clean, heatmap, coord, tau, phi, snr_tensor, sample_id
+		return signal, signal_clean, heatmap, coord, tau, phi, snr_tensor, num_targets, sample_id
         
 
 def _add_noise(signal: torch.Tensor, snr_db: torch.Tensor) -> torch.Tensor:
@@ -111,6 +113,7 @@ def _load_sample_with_scipy(file_path: Path) -> Dict[str, Any]:
 			"tau": sample_obj.tau,
 			"phi": sample_obj.phi,
 			"SNR": getattr(sample_obj, "SNR", None),
+			"num_targets": sample_obj.numTargets,
 			"sample_id": sample_obj.sample_id,
 		}
 
@@ -125,6 +128,7 @@ def _load_sample_with_scipy(file_path: Path) -> Dict[str, Any]:
 			"tau": elem["tau"],
 			"phi": elem["phi"],
 			"SNR": elem["SNR"] if has_snr else None,
+			"num_targets": elem["numTargets"],
 			"sample_id": elem["sample_id"],
 		}
 	
@@ -141,12 +145,13 @@ def _load_sample_with_h5py(file_path: Path) -> Dict[str, Any]:
 
 		return {
 			"y_ell": _read_h5_field(f, sample_group, "y_ell"),
-			"y_clean": _read_h5_field(f, sample_group, "y_clean"),
 			"heatmap": _read_h5_field(f, sample_group, "heatmap"),
 			"target_xyz": _read_h5_field(f, sample_group, "target_xyz"),
 			"tau": _read_h5_field(f, sample_group, "tau"),
 			"phi": _read_h5_field(f, sample_group, "phi"),
 			"SNR": _read_h5_optional_field(f, sample_group, "SNR"),
+			"num_targets": _read_h5_field(f, sample_group, "numTargets"),
+			"y_clean": _read_h5_field(f, sample_group, "y_clean"),
 			"sample_id": _read_h5_field(f, sample_group, "sample_id"),
 		}
 
@@ -204,7 +209,7 @@ def _to_numpy_array(data: Any) -> np.ndarray:
 
 	# MATLAB/HDF5 stores dimensions in Fortran order; transpose recovers MATLAB layout.
 	if arr.ndim >= 2:
-		arr = np.transpose(arr)
+		arr = np.ascontiguousarray(np.transpose(arr))
 
 	return arr
 
@@ -212,12 +217,15 @@ def _to_numpy_array(data: Any) -> np.ndarray:
 def _to_signal_tensor(signal: Any) -> torch.Tensor:
 	arr = np.asarray(signal)
 
+	if arr.ndim == 1:
+		return torch.empty(0, dtype=torch.float32)
+
 	if np.iscomplexobj(arr):
 		arr = np.stack([arr.real, arr.imag], axis=0)
 	elif arr.ndim == 3 and arr.shape[0] == 2:
 		pass
 	elif arr.ndim == 3 and arr.shape[-1] == 2:
-		arr = np.transpose(arr, (2, 0, 1))
+		arr = np.ascontiguousarray(np.transpose(arr, (2, 0, 1)))
 	else:
 		raise ValueError(
 			"y_ell must be complex [M,N] or real-imag channels [2,M,N]/[M,N,2]"
@@ -239,16 +247,29 @@ def _to_heatmap_tensor(heatmap: Any) -> torch.Tensor:
 
 
 def _to_coord_tensor(coord: Any) -> torch.Tensor:
-	arr = np.asarray(coord, dtype=np.float32).reshape(-1)
-	if arr.size != 3:
-		raise ValueError("target_xyz must contain exactly 3 values")
-
-	return torch.from_numpy(arr)
+	arr = np.ascontiguousarray(np.asarray(coord, dtype=np.float32))
+	if arr.ndim != 2 or arr.shape[1] != 3:
+		raise ValueError(
+			f"target_xyz must have shape [MAX_TARGETS, 3], got {arr.shape}"
+		)
+	return torch.from_numpy(arr)  # [MAX_TARGETS, 3]
 
 
 def _to_tau_tensor(tau: Any) -> torch.Tensor:
-	arr = np.asarray(tau, dtype=np.float32).reshape(-1)
-	return torch.from_numpy(arr)
+	arr = np.ascontiguousarray(np.asarray(tau, dtype=np.float32))
+	if arr.ndim != 2:
+		raise ValueError(
+			f"tau/phi must have shape [M, MAX_TARGETS], got {arr.shape}"
+		)
+	return torch.from_numpy(arr)  # [M, MAX_TARGETS]
+
+
+def _to_num_targets_tensor(value: Any) -> torch.Tensor:
+	return torch.tensor(int(np.asarray(value).reshape(-1)[0]), dtype=torch.long)
+
+
+def _to_sample_id_tensor(value: Any) -> torch.Tensor:
+	return torch.tensor(int(np.asarray(value).reshape(-1)[0]), dtype=torch.long)
 
 
 def _to_scalar_tensor(value: Any) -> torch.Tensor:
@@ -256,7 +277,3 @@ def _to_scalar_tensor(value: Any) -> torch.Tensor:
 	if arr.size == 0:
 		raise ValueError("SNR must contain at least one value")
 	return torch.tensor(arr[0], dtype=torch.float32)
-
-
-def _to_sample_id_tensor(value: Any) -> torch.Tensor:
-	return torch.tensor(int(np.asarray(value).reshape(-1)[0]), dtype=torch.long)

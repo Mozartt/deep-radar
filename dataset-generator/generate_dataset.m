@@ -5,34 +5,49 @@ close all;
 addpath("../simulator/")
 
 %% =========================================================
-% Dataset generation for radar heatmap learning
-%
-% Assumes you already implemented:
-%
-%   heatmap = get_heatmap(p_target, alpha, SNR)
+% Dataset generation for radar localization
 %
 % INPUT:
-%   p_target : [x;y;z]
 %   alpha    : target amplitude
 %   SNR      : SNR in dB
 %
 % OUTPUT:
-%   heatmap  : 2D matrix
+%   
 %
 %% =========================================================
+%% -------------------------------
+% Transmission parameters
+%% -------------------------------
+tran_config.c = 3e8; % light speed [m/S]
+tran_config.fc = 2e9; % center freq [Hz]
+tran_config.BW = 0.2e9; % Band width [Hz]
+tran_config.M = 40; % Number of receivers
+tran_config.Tc = 20e-6; % Chip length [sec]
+tran_config.a = tran_config.BW / tran_config.Tc;
+tran_config.Fs = 50e6; % sampling freq [Hz]
+tran_config.Ts = 1 / tran_config.Fs; % sampling period
+tran_config.N = round(tran_config.Tc * tran_config.Fs); % number of samples
+tran_config.n = 0 : tran_config.N-1;
+tran_config.recievers_circle_radius = 100; % receivers are ordered in a circle
+tran_config.p_trnsmt = zeros(3,1); % Transmitter location [x;y;z] [meters]
+
+theta = 2 * pi * (0 : tran_config.M-1)./tran_config.M; % radians
+R = tran_config.recievers_circle_radius;
+tran_config.q = R*[cos(theta); sin(theta); zeros(size(theta)) ]; % antenna locations [meters]
 
 %% -------------------------------
 % Dataset parameters
 %% -------------------------------
 
-numSamples = 10000;
+numSamples = 80000;
+numOfTargets = 4; % number of targets per sample
 
 % Signal parameters
 alphaRange = [1, 1];
 snrRange   = [-5, 20]; %dB
 
 % Output folder
-datasetDir = "D:\radar-dataset-clean\";
+datasetDir = "D:\radar-dataset-multi-targets-2\";
 
 testDir  = fullfile(datasetDir, 'test');
 valDir   = fullfile(datasetDir, 'validation');
@@ -57,7 +72,8 @@ splitLabel(perm(nTest+nVal+1:end))     = 3;
 % Preallocate labels
 %% -------------------------------
 
-targetXYZ = zeros(numSamples, 3);
+targets_all = cell(numSamples, 1);
+targets_num = cell(numSamples,1);
 alphaVec  = zeros(numSamples, 1);
 snrVec    = zeros(numSamples, 1);
 
@@ -67,21 +83,14 @@ snrVec    = zeros(numSamples, 1);
 
 fprintf('Generating dataset...\n');
 radius = 150;
-theta = 2 * pi * rand(numSamples, 1);
-r = radius * sqrt(rand(numSamples, 1));
 zRange = [200 300];
-Z = zRange(1) + (zRange(2) - zRange(1)) * rand(numSamples, 1);
 
 for i = 1:numSamples
 
     %% ---------------------------------
     % Random target location
     %% ---------------------------------
-
-    x = r(i) .* cos(theta(i));
-    y = r(i) .* sin(theta(i));
-    z = Z(i);
-    p_target = [x; y; z];
+    [targets, K] = sample_targets_simple(0, radius, zRange(1), zRange(2), numOfTargets);
     
     %% ---------------------------------
     % Random radar conditions
@@ -94,7 +103,7 @@ for i = 1:numSamples
     % Generate heatmap
     %% ---------------------------------
 
-    [y_ell, tau, phi] = get_radar_response(p_target, alpha, SNR);
+    [y_clean, y_ell, tau, phi] = get_radar_response_noisy(targets, alpha, SNR, numOfTargets, K, tran_config);
 
     %% ---------------------------------
     % Normalize heatmap
@@ -107,11 +116,13 @@ for i = 1:numSamples
     %% ---------------------------------
 
     sample = struct( ...
+        'y_clean', single(y_clean), ...
         'y_ell', single(y_ell), ...
         'heatmap', single(heatmap), ...
+        'numTargets', single(K), ...
         'tau', single(tau), ...
         'phi', single(phi), ...
-        'target_xyz', single([x y z]), ...
+        'target_xyz', single(targets), ...
         'alpha', single(alpha), ...
         'SNR', single(SNR), ...
         'sample_id', i ...
@@ -136,7 +147,8 @@ for i = 1:numSamples
     % Save labels also globally
     %% ---------------------------------
 
-    targetXYZ(i,:) = [x y z];
+    targets_all{i} = targets;
+    targets_num{i} = size(targets,1);
     alphaVec(i) = alpha;
     snrVec(i) = SNR;
 
@@ -148,15 +160,11 @@ end
 
 metadata.numSamples = numSamples;
 
-%metadata.xRange = xRange;
-%metadata.yRange = yRange;
-%metadata.zRange = zRange;
-
 metadata.alphaRange = alphaRange;
 metadata.snrRange = snrRange;
 
-metadata.targetXYZ = targetXYZ;
-
+metadata.targets = targets_all;
+metadata.targets_num = targets_num;
 metadata.alphaVec = alphaVec;
 metadata.snrVec = snrVec;
 
